@@ -1,8 +1,20 @@
 {
   "strategy_name": "WolfStrategyV1",
   "params": {
+    "roi": {
+      "0": 0.366,
+      "80": 0.112,
+      "143": 0.028,
+      "338": 0
+    },
     "stoploss": {
       "stoploss": -0.99
+    },
+    "trailing": {
+      "trailing_stop": true,
+      "trailing_stop_positive": 0.023,
+      "trailing_stop_positive_offset": 0.067,
+      "trailing_only_offset_is_reached": false
     },
     "max_open_trades": {
       "max_open_trades": 1
@@ -11,36 +23,24 @@
       "atr_period": 14,
       "long_leverage_max": 5.0,
       "long_leverage_min": 2.0,
-      "dca_base_drop": 0.033,
-      "dca_cooling_candles": 8,
-      "dca_max_count": 3,
-      "dca_multiplier": 1.745,
-      "donchian_period": 38,
-      "ema_fast": 84,
-      "ema_slow": 103,
-      "rsi_oversold": 35,
-      "rsi_period": 9
+      "dca_base_drop": 0.049,
+      "dca_cooling_candles": 2,
+      "dca_max_count": 8,
+      "dca_multiplier": 2.266,
+      "donchian_period": 18,
+      "ema_fast": 34,
+      "ema_slow": 136,
+      "rsi_oversold": 27,
+      "rsi_period": 14
     },
     "sell": {
-      "short_max_stake": 50.0,
       "breakeven_trigger": 0.018,
       "partial_profit_pct": 0.047,
+      "short_max_stake": 50.0,
       "short_take_profit": 0.021,
       "trailing_atr_mult": 2.036
-    },
-    "roi": {
-      "0": 0.366,
-      "80": 0.112,
-      "143": 0.028,
-      "338": 0
-    },
-    "trailing": {
-      "trailing_stop": true,
-      "trailing_stop_positive": 0.023,
-      "trailing_stop_positive_offset": 0.067,
-      "trailing_only_offset_is_reached": false
     }
   },
   "ft_stratparam_v": 1,
-  "export_time": "2026-02-11 05:48:27.972630+00:00"
+  "export_time": "2026-02-11 05:51:40.973861+00:00"
 }
