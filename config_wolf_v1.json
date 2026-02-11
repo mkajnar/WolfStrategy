@@ -262,7 +262,7 @@
     "export_trades": true,
     "timerange": null,
     "runmode": null,
-    "liquidation_buffer": "0.05",
+    "liquidation_buffer": "0.10",
     "trading_mode": "futures",
     "margin_mode": "isolated",
     "unfilledtimeout": {

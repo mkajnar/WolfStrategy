@@ -4,14 +4,16 @@ WolfStrategyV1 - Long -> Short Profit Flip Strategy
 Donchian Channel bounce Long with DCA + 100x Short on breakout down.
 
 Phases:
-  1. Long: Enter on Donchian lower bounce + RSI oversold + support
-     - DCA up to N positions, each lower than previous
-     - Exit via trailing stop or ROI
+  1. Long: Enter on Donchian lower bounce + RSI oversold + trend filter
+     + bullish reversal + volume spike + bounce confirmation
+     - DCA with cooling period, progressive spacing, support detection
+     - Exit via ATR-based stepped trailing stop or ROI
   2. Short: Enter on Donchian breakout down after profitable Long exit
-     - 100x leverage, strict SL/TP
+     - MACD histogram + volume breakdown + EMA confirmation
+     - 100x leverage, strict TP
      - Funded from profit bucket (Long phase profit)
 
-Version: 2.0.0
+Version: 3.0.0
 """
 
 import datetime
@@ -36,36 +38,34 @@ class WolfStrategyV1(IStrategy):
     can_short = True
     timeframe = '15m'
 
+    # -- Only 1 open trade at a time --
+    max_open_trades = 1
+
     # -- Minimal ROI: only for Long --
     minimal_roi = {
-        "0": 0.05,       # 5% default ROI
-        "60": 0.03,      # 3% after 60 min
-        "180": 0.015,    # 1.5% after 3h
-        "720": 0.005     # 0.5% after 12h
+        "0": 0.06,       # 6% default ROI
+        "60": 0.04,      # 4% after 60 min
+        "180": 0.025,    # 2.5% after 3h
+        "720": 0.01      # 1% after 12h
     }
 
-    # -- Stoploss: effectively disabled, DCA handles drawdowns --
-    # At 2-5x leverage, -0.99 means price must drop ~50% to trigger
-    # We rely on DCA to average down and trailing stop to exit in profit
+    # -- Stoploss: effectively disabled for Long, DCA handles drawdowns --
     stoploss = -0.99
 
-    # -- Trailing stop for Long --
-    trailing_stop = True
-    trailing_only_offset_is_reached = True
-    trailing_stop_positive = 0.01       # 1% trailing
-    trailing_stop_positive_offset = 0.02  # activate after 2% profit
+    # -- Trailing stop: will be overridden by custom_stoploss --
+    trailing_stop = False
 
     # -- Order types --
     order_types = {
         'entry': 'market',
         'exit': 'market',
         'stoploss': 'market',
-        'stoploss_on_exchange': False
+        'stoploss_on_exchange': True
     }
 
     # -- Signals --
     use_exit_signal = True
-    exit_profit_only = True  # Long exit signals fire only when in profit
+    exit_profit_only = False
 
     # -- DCA --
     position_adjustment_enable = True
@@ -78,28 +78,45 @@ class WolfStrategyV1(IStrategy):
     rsi_period = IntParameter(7, 21, default=14, space='buy', optimize=True)
     atr_period = IntParameter(10, 20, default=14, space='buy', optimize=False)
 
+    # EMA trend filter
+    ema_fast = IntParameter(20, 100, default=50, space='buy', optimize=True)
+    ema_slow = IntParameter(100, 300, default=200, space='buy', optimize=True)
+
     # DCA parameters
     dca_max_count = IntParameter(2, 8, default=5, space='buy', optimize=True)
-    dca_price_drop = DecimalParameter(0.01, 0.08, default=0.03, space='buy', optimize=True)
+    dca_base_drop = DecimalParameter(0.02, 0.06, default=0.03, space='buy', optimize=True)
     dca_multiplier = DecimalParameter(1.1, 2.5, default=1.5, space='buy', optimize=True)
+    dca_cooling_candles = IntParameter(2, 12, default=4, space='buy', optimize=True)
 
     # Long leverage
-    long_leverage_min = DecimalParameter(1.0, 3.0, default=2.0, space='buy', optimize=False)
-    long_leverage_max = DecimalParameter(3.0, 10.0, default=5.0, space='buy', optimize=False)
+    long_leverage_min = DecimalParameter(2.0, 4.0, default=2.0, space='buy', optimize=False)
+    long_leverage_max = DecimalParameter(5.0, 10.0, default=7.0, space='buy', optimize=False)
 
     # ================================================================
     # HYPEROPT PARAMETERS - SELL SPACE
     # ================================================================
-    short_stop_loss = DecimalParameter(0.005, 0.015, default=0.009, space='sell', optimize=True)
     short_take_profit = DecimalParameter(0.02, 0.06, default=0.03, space='sell', optimize=True)
 
+    # Trailing stop parameters
+    trailing_atr_mult = DecimalParameter(1.0, 3.0, default=1.5, space='sell', optimize=True)
+    breakeven_trigger = DecimalParameter(0.01, 0.03, default=0.015, space='sell', optimize=True)
+
+    # Partial profit taking
+    partial_profit_pct = DecimalParameter(0.02, 0.05, default=0.03, space='sell', optimize=True)
+
+    # Short max stake cap (USDT)
+    short_max_stake = DecimalParameter(20.0, 100.0, default=50.0, space='sell', optimize=False)
+
     # ================================================================
-    # RUNTIME STATE (not persisted across restarts in backtesting)
+    # RUNTIME STATE
     # ================================================================
     custom_profit_bucket: Dict[str, float] = {}
     awaiting_short: Dict[str, bool] = {}
     last_buy_price: Dict[str, float] = {}
     dca_count: Dict[str, int] = {}
+    last_dca_candle: Dict[str, int] = {}       # candle index of last DCA
+    partial_profit_taken: Dict[str, bool] = {}  # track partial TP
+    loss_cooldown_until: Dict[str, datetime.datetime] = {}  # cooldown after loss
 
     # ================================================================
     # INDICATORS
@@ -117,23 +134,89 @@ class WolfStrategyV1(IStrategy):
         # -- RSI --
         dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_period.value)
 
-        # -- ATR (for leverage calculation) --
+        # -- ATR (for leverage + trailing) --
         dataframe['atr'] = ta.ATR(dataframe, timeperiod=self.atr_period.value)
         dataframe['atr_pct'] = dataframe['atr'] / dataframe['close'] * 100
 
-        # -- Volume SMA for confirmation --
-        dataframe['volume_sma'] = dataframe['volume'].rolling(window=20).mean()
+        # -- EMA Trend Filter --
+        dataframe['ema_fast'] = ta.EMA(dataframe, timeperiod=self.ema_fast.value)
+        dataframe['ema_slow'] = ta.EMA(dataframe, timeperiod=self.ema_slow.value)
+        dataframe['uptrend'] = dataframe['ema_fast'] > dataframe['ema_slow']
 
-        # -- Support detection: rolling min of last N lows --
-        dataframe['support'] = dataframe['low'].rolling(window=50, min_periods=20).min()
+        # -- MACD --
+        macd = ta.MACD(dataframe, fastperiod=12, slowperiod=26, signalperiod=9)
+        dataframe['macd'] = macd['macd']
+        dataframe['macd_signal'] = macd['macdsignal']
+        dataframe['macd_hist'] = macd['macdhist']
+
+        # -- Bollinger Bands --
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
+        dataframe['bb_upper'] = bollinger['upperband']
+        dataframe['bb_lower'] = bollinger['lowerband']
+        dataframe['bb_mid'] = bollinger['middleband']
+        dataframe['bb_pctb'] = (dataframe['close'] - dataframe['bb_lower']) / \
+                                (dataframe['bb_upper'] - dataframe['bb_lower']).replace(0, np.nan)
+
+        # -- Volume analysis --
+        dataframe['volume_sma'] = dataframe['volume'].rolling(window=20).mean()
+        dataframe['volume_ratio'] = dataframe['volume'] / dataframe['volume_sma'].replace(0, np.nan)
+
+        # -- VWAP-like: cumulative (volume * close) / cumulative volume (daily reset approx) --
+        dataframe['vwap'] = (
+            (dataframe['volume'] * (dataframe['high'] + dataframe['low'] + dataframe['close']) / 3)
+            .rolling(window=20).sum() /
+            dataframe['volume'].rolling(window=20).sum().replace(0, np.nan)
+        )
+
+        # -- Support detection: pivot lows (fractal-like) --
+        dataframe['pivot_low'] = (
+            (dataframe['low'] < dataframe['low'].shift(1)) &
+            (dataframe['low'] < dataframe['low'].shift(2)) &
+            (dataframe['low'] < dataframe['low'].shift(-1)) &
+            (dataframe['low'] < dataframe['low'].shift(-2))
+        )
+        # Rolling support = lowest pivot low in last 50 bars
+        dataframe['support'] = dataframe['low'].where(dataframe['pivot_low']).ffill()
+        dataframe['support'] = dataframe['support'].rolling(window=50, min_periods=1).min()
 
         # -- Donchian position: 0 = at lower, 1 = at upper --
         dc_range = dataframe['dc_upper'] - dataframe['dc_lower']
-        dataframe['dc_position'] = (dataframe['close'] - dataframe['dc_lower']) / dc_range.replace(0, np.nan)
+        dataframe['dc_position'] = (
+            (dataframe['close'] - dataframe['dc_lower']) /
+            dc_range.replace(0, np.nan)
+        )
 
-        # -- Price near lower Donchian (within 1% of lower band) --
+        # -- Price near lower Donchian (within 1.5% of lower band) --
         dataframe['near_dc_lower'] = (
-            dataframe['close'] <= dataframe['dc_lower'] * 1.01
+            dataframe['close'] <= dataframe['dc_lower'] * 1.015
+        )
+
+        # -- Bullish reversal candle patterns --
+        # Hammer: small body at top, long lower wick
+        body = abs(dataframe['close'] - dataframe['open'])
+        full_range = (dataframe['high'] - dataframe['low']).replace(0, np.nan)
+        lower_wick = np.minimum(dataframe['close'], dataframe['open']) - dataframe['low']
+
+        dataframe['hammer'] = (
+            (lower_wick > body * 2) &
+            (body / full_range < 0.35)
+        )
+
+        # Bullish engulfing: current green candle body engulfs previous red
+        dataframe['bullish_engulfing'] = (
+            (dataframe['close'] > dataframe['open']) &                      # current green
+            (dataframe['close'].shift(1) < dataframe['open'].shift(1)) &    # previous red
+            (dataframe['close'] > dataframe['open'].shift(1)) &             # current close > prev open
+            (dataframe['open'] < dataframe['close'].shift(1))               # current open < prev close
+        )
+
+        # Any bullish reversal signal
+        dataframe['bullish_reversal'] = dataframe['hammer'] | dataframe['bullish_engulfing']
+
+        # -- Bounce confirmation: close above previous low --
+        dataframe['bounce_confirmed'] = (
+            (dataframe['close'] > dataframe['low'].shift(1)) &
+            (dataframe['close'] > dataframe['open'])  # green candle
         )
 
         # -- Donchian breakout down: close below previous lower --
@@ -148,6 +231,15 @@ class WolfStrategyV1(IStrategy):
             (dataframe['close'].shift(1) < dataframe['open'].shift(1))
         )
 
+        # -- Volume declining (for DCA - selling exhaustion) --
+        dataframe['volume_declining'] = (
+            (dataframe['volume'] < dataframe['volume'].shift(1)) &
+            (dataframe['volume'].shift(1) < dataframe['volume'].shift(2))
+        )
+
+        # -- Candle index for cooling period tracking --
+        dataframe['candle_idx'] = range(len(dataframe))
+
         return dataframe
 
     # ================================================================
@@ -156,22 +248,40 @@ class WolfStrategyV1(IStrategy):
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
 
-        # -- LONG: Donchian lower bounce + RSI oversold --
+        # -- LONG: Donchian lower bounce + RSI oversold + trend + reversal + volume --
         long_conditions = (
             (dataframe['near_dc_lower']) &
             (dataframe['rsi'] < self.rsi_oversold.value) &
-            (dataframe['volume'] > 0) &
-            (dataframe['volume'] > dataframe['volume_sma'] * 0.5)
+            (dataframe['uptrend']) &                              # EMA trend filter
+            (dataframe['bullish_reversal'] | dataframe['bounce_confirmed']) &  # reversal confirmation
+            (dataframe['volume_ratio'] > 1.2) &                  # volume spike
+            (dataframe['volume'] > 0)
         )
         dataframe.loc[long_conditions, ['enter_long', 'enter_tag']] = (1, 'long_dc_bounce')
 
-        # -- SHORT: Donchian breakout down --
-        # Note: In backtesting, profit bucket check happens in confirm_trade_entry
+        # -- LONG fallback: strong bounce without reversal candle pattern --
+        # Less strict but still requires trend + oversold + Bollinger confirmation
+        long_fallback = (
+            (dataframe['near_dc_lower']) &
+            (dataframe['rsi'] < self.rsi_oversold.value - 5) &   # deeper oversold
+            (dataframe['uptrend']) &
+            (dataframe['bb_pctb'] < 0.1) &                       # near BB lower band
+            (dataframe['bounce_confirmed']) &
+            (dataframe['volume'] > 0) &
+            (~long_conditions)                                     # not already triggered
+        )
+        dataframe.loc[long_fallback, ['enter_long', 'enter_tag']] = (1, 'long_bb_dc_bounce')
+
+        # -- SHORT: Donchian breakout down + MACD + volume + EMA --
         short_conditions = (
             (dataframe['dc_breakout_down']) &
             (dataframe['bear_candle']) &
-            (dataframe['rsi'] > 30) &  # not already extremely oversold
-            (dataframe['volume'] > dataframe['volume_sma'])
+            (dataframe['macd_hist'] < 0) &                        # MACD histogram negative
+            (dataframe['macd_hist'] < dataframe['macd_hist'].shift(1)) &  # and falling
+            (dataframe['close'] < dataframe['ema_fast']) &        # price below EMA50
+            (dataframe['volume_ratio'] > 1.5) &                   # strong volume breakdown
+            (dataframe['rsi'] > 25) &                             # not already extremely oversold
+            (dataframe['rsi'] < 55)                                # not overbought
         )
         dataframe.loc[short_conditions, ['enter_short', 'enter_tag']] = (1, 'short_dc_breakout')
 
@@ -190,8 +300,7 @@ class WolfStrategyV1(IStrategy):
         ) & (dataframe['volume'] > 0)
         dataframe.loc[long_exit, ['exit_long', 'exit_tag']] = (1, 'long_dc_upper')
 
-        # -- SHORT EXIT is handled by custom_exit (SL/TP), not signals --
-        # But add emergency signal exit if price goes way above entry
+        # -- SHORT EXIT: emergency signal if price explodes up --
         short_exit = (
             (dataframe['close'] > dataframe['dc_upper']) &
             (dataframe['rsi'] > 70)
@@ -201,7 +310,68 @@ class WolfStrategyV1(IStrategy):
         return dataframe
 
     # ================================================================
-    # CONFIRM TRADE ENTRY (runtime gate for Short)
+    # CUSTOM STOPLOSS (ATR-based stepped trailing)
+    # ================================================================
+
+    def custom_stoploss(
+        self,
+        pair: str,
+        trade: Trade,
+        current_time: datetime.datetime,
+        current_rate: float,
+        current_profit: float,
+        after_fill: bool,
+        **kwargs
+    ) -> Optional[float]:
+        """
+        ATR-based stepped trailing stop for Long.
+        Short: no custom stoploss (TP handled in custom_exit, no SL - house money).
+
+        Steps:
+          - Profit < breakeven_trigger: default stoploss (-0.99)
+          - Profit >= breakeven_trigger: move to breakeven + 0.2% (cover fees)
+          - Profit 1-3%: trail at 1.5x ATR
+          - Profit 3-5%: trail at 1.0x ATR (tighter)
+          - Profit 5%+: trail at 0.7x ATR (very tight)
+        """
+        if trade.is_short:
+            # Short: let it ride, no SL - stake is profit bucket money
+            return -0.99
+
+        # Get ATR for dynamic trailing
+        try:
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if dataframe.empty:
+                return -0.99
+            atr_pct = dataframe.iloc[-1].get('atr_pct', 1.0) / 100.0  # convert to decimal
+        except Exception:
+            atr_pct = 0.01  # fallback 1%
+
+        atr_mult = float(self.trailing_atr_mult.value)
+        be_trigger = float(self.breakeven_trigger.value)
+
+        # Step 1: Below breakeven trigger - default wide SL
+        if current_profit < be_trigger:
+            return -0.99
+
+        # Step 2: At breakeven trigger - move to breakeven + fee buffer
+        if current_profit < 0.03:
+            # Trail at 1.5x ATR or breakeven, whichever is tighter
+            trail = max(atr_pct * atr_mult, 0.003)  # at least 0.3%
+            sl = min(-trail, -0.002)  # at least breakeven + 0.2%
+            return sl
+
+        # Step 3: 3-5% profit - tighter trailing
+        if current_profit < 0.05:
+            trail = max(atr_pct * atr_mult * 0.7, 0.003)
+            return -trail
+
+        # Step 4: 5%+ profit - very tight trailing
+        trail = max(atr_pct * atr_mult * 0.5, 0.002)
+        return -trail
+
+    # ================================================================
+    # CONFIRM TRADE ENTRY (runtime gate for Short + cooldown)
     # ================================================================
 
     def confirm_trade_entry(
@@ -218,7 +388,7 @@ class WolfStrategyV1(IStrategy):
     ) -> bool:
         """
         Gate Short entries: only allow if profit bucket > 0.
-        Always allow Long entries.
+        Gate Long entries: check cooldown after loss.
         """
         if side == 'short':
             profit = self.custom_profit_bucket.get(pair, 0.0)
@@ -233,14 +403,23 @@ class WolfStrategyV1(IStrategy):
                 f"[SHORT_ENTRY] {pair} - Profit bucket: {profit:.2f}, "
                 f"allowing Short at {rate:.2f}"
             )
-            # Reset awaiting flag
             self.awaiting_short[pair] = False
             return True
 
-        # Long: always allow, reset DCA state
+        # Long: check cooldown after loss
         if side == 'long':
+            cooldown_until = self.loss_cooldown_until.get(pair)
+            if cooldown_until and current_time < cooldown_until:
+                logger.info(
+                    f"[LONG_COOLDOWN] {pair} - Cooling down until {cooldown_until}, "
+                    f"blocking Long entry"
+                )
+                return False
+
             self.dca_count[pair] = 0
             self.last_buy_price[pair] = rate
+            self.last_dca_candle[pair] = 0
+            self.partial_profit_taken[pair] = False
             logger.info(f"[LONG_ENTRY] {pair} - Entry at {rate:.2f}")
 
         return True
@@ -263,7 +442,7 @@ class WolfStrategyV1(IStrategy):
     ) -> float:
         """
         Long: Divide wallet across DCA positions.
-        Short: Use profit bucket amount.
+        Short: Use profit bucket amount (capped).
         """
         try:
             if side == 'short':
@@ -271,16 +450,21 @@ class WolfStrategyV1(IStrategy):
                 profit = self.custom_profit_bucket.get(pair, 0.0)
                 if profit <= 0:
                     return min_stake or 30.0
-                # Use profit as stake for Short (with 100x leverage = huge position)
-                short_stake = max(profit * 0.9, min_stake or 30.0)
+                # Cap short stake to limit risk
+                cap = float(self.short_max_stake.value)
+                short_stake = min(profit * 0.9, cap)
+                short_stake = max(short_stake, min_stake or 30.0)
                 short_stake = min(short_stake, max_stake)
-                logger.info(f"[SHORT_STAKE] {pair} - Stake: {short_stake:.2f} from bucket: {profit:.2f}")
+                logger.info(
+                    f"[SHORT_STAKE] {pair} - Stake: {short_stake:.2f} "
+                    f"from bucket: {profit:.2f}, cap: {cap:.2f}"
+                )
                 return short_stake
 
             # Long: split wallet for DCA room
             balance = self.wallets.get_total_stake_amount()
-            num_positions = self.dca_max_count.value + 1  # initial + DCA slots
-            per_position = balance * 0.8 / num_positions  # 80% of wallet, split
+            num_positions = self.dca_max_count.value + 1
+            per_position = balance * 0.8 / num_positions
             final = max(per_position, min_stake or 30.0)
             final = min(final, max_stake)
 
@@ -310,7 +494,7 @@ class WolfStrategyV1(IStrategy):
         **kwargs
     ) -> float:
         """
-        Long: Dynamic 2-5x based on ATR volatility.
+        Long: Dynamic 2-10x based on ATR volatility.
         Short: Fixed 100x.
         """
         if side == 'short':
@@ -323,19 +507,18 @@ class WolfStrategyV1(IStrategy):
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             if not dataframe.empty:
                 atr_pct = dataframe.iloc[-1].get('atr_pct', 1.0)
-                # High ATR -> lower leverage, Low ATR -> higher leverage
                 lev_min = float(self.long_leverage_min.value)
                 lev_max = float(self.long_leverage_max.value)
-                if atr_pct > 2.0:
+                if atr_pct > 3.0:
                     lev = lev_min
                 elif atr_pct < 0.5:
                     lev = lev_max
                 else:
                     # Linear interpolation: high ATR -> low leverage
-                    ratio = (2.0 - atr_pct) / 1.5
+                    ratio = (3.0 - atr_pct) / 2.5
                     lev = lev_min + ratio * (lev_max - lev_min)
-                lev = min(lev, max_leverage)
-                logger.info(f"[LEVERAGE] {pair} Long: {lev:.1f}x (ATR%: {atr_pct:.2f})")
+                lev = round(min(lev, max_leverage), 1)
+                logger.info(f"[LEVERAGE] {pair} Long: {lev}x (ATR%: {atr_pct:.2f})")
                 return lev
         except Exception as e:
             logger.error(f"Error in leverage: {e}")
@@ -343,7 +526,7 @@ class WolfStrategyV1(IStrategy):
         return min(3.0, max_leverage)
 
     # ================================================================
-    # DCA (adjust_trade_position)
+    # DCA (adjust_trade_position) - Enhanced
     # ================================================================
 
     def adjust_trade_position(
@@ -361,10 +544,12 @@ class WolfStrategyV1(IStrategy):
         **kwargs
     ) -> Optional[float]:
         """
-        DCA for Long only:
-        1. Price must be below last buy price by dca_price_drop %
-        2. RSI must be oversold (support confirmation)
-        3. Max dca_max_count positions
+        Enhanced DCA for Long only:
+        1. Progressive spacing: each DCA needs bigger drop than previous
+        2. Cooling period: min N candles between DCA orders
+        3. RSI oversold confirmation
+        4. Volume declining = selling exhaustion (preferred)
+        5. Max drawdown check: stop DCA if too deep
         """
         pair = trade.pair
 
@@ -378,28 +563,64 @@ class WolfStrategyV1(IStrategy):
         if count >= max_dca:
             return None
 
-        # Price must be lower than last buy
+        # Max drawdown check: stop DCA if unrealized loss > 15%
+        if current_profit < -0.15:
+            logger.info(
+                f"[DCA_BLOCKED] {pair} - Drawdown {current_profit:.2%} > 15%, "
+                f"stopping DCA"
+            )
+            return None
+
+        # Progressive spacing: each DCA needs a bigger drop
+        # DCA1: base_drop, DCA2: base_drop * 1.5, DCA3: base_drop * 2.0, etc.
+        base_drop = float(self.dca_base_drop.value)
+        progressive_factor = 1.0 + (count * 0.5)
+        required_drop = base_drop * progressive_factor
+
         last_price = self.last_buy_price.get(pair, None) or trade.open_rate
-        required_price = last_price * (1.0 - float(self.dca_price_drop.value))
+        required_price = last_price * (1.0 - required_drop)
 
         if current_rate >= required_price:
             return None
 
-        # Get dataframe for RSI confirmation
+        # Cooling period check
         try:
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             if dataframe.empty:
                 return None
             last_candle = dataframe.iloc[-1]
+            current_candle_idx = int(last_candle.get('candle_idx', 0))
 
-            # RSI must be below threshold (oversold = support bounce likely)
+            last_dca_idx = self.last_dca_candle.get(pair, 0)
+            cooling = self.dca_cooling_candles.value
+            if (current_candle_idx - last_dca_idx) < cooling:
+                logger.info(
+                    f"[DCA_COOLING] {pair} #{count+1} - "
+                    f"Waiting {cooling - (current_candle_idx - last_dca_idx)} more candles"
+                )
+                return None
+
+            # RSI must be below threshold
             rsi = last_candle.get('rsi', 50)
-            if rsi > self.rsi_oversold.value + 10:  # Give some room above oversold
+            if rsi > self.rsi_oversold.value + 10:
                 logger.info(
                     f"[DCA_SKIP] {pair} #{count+1} - RSI {rsi:.1f} too high "
                     f"(need < {self.rsi_oversold.value + 10})"
                 )
                 return None
+
+            # Prefer volume declining (selling exhaustion)
+            vol_declining = last_candle.get('volume_declining', False)
+            near_support = current_rate <= last_candle.get('support', 0) * 1.02
+
+            # If neither volume dry-up nor near support, skip (but allow deep oversold)
+            if not vol_declining and not near_support and rsi > self.rsi_oversold.value:
+                logger.info(
+                    f"[DCA_SKIP] {pair} #{count+1} - "
+                    f"No volume dry-up, not near support, RSI not deep oversold"
+                )
+                return None
+
         except Exception:
             return None
 
@@ -407,9 +628,9 @@ class WolfStrategyV1(IStrategy):
         try:
             available = self.wallets.get_available_stake_amount()
             multiplier = float(self.dca_multiplier.value)
-            base_stake = trade.stake_amount  # original stake of the trade
+            base_stake = trade.stake_amount
             dca_stake = base_stake * (multiplier ** (count + 1)) / multiplier
-            dca_stake = min(dca_stake, available * 0.5)  # max 50% of remaining
+            dca_stake = min(dca_stake, available * 0.5)
             dca_stake = min(dca_stake, max_stake)
             dca_stake = max(dca_stake, min_stake or 30.0)
         except Exception:
@@ -418,17 +639,19 @@ class WolfStrategyV1(IStrategy):
         # Update state
         self.last_buy_price[pair] = current_rate
         self.dca_count[pair] = count + 1
+        self.last_dca_candle[pair] = current_candle_idx
 
         logger.info(
             f"[DCA] {pair} #{count+1}/{max_dca} - "
-            f"Price: {current_rate:.2f} (last: {last_price:.2f}), "
+            f"Price: {current_rate:.2f} (last: {last_price:.2f}, "
+            f"drop: {required_drop:.1%}), "
             f"RSI: {rsi:.1f}, Stake: {dca_stake:.2f}"
         )
 
         return dca_stake
 
     # ================================================================
-    # CUSTOM EXIT (Short TP only - no SL, let it ride or liquidate)
+    # CUSTOM EXIT (Short TP + Long partial profit)
     # ================================================================
 
     def custom_exit(
@@ -441,23 +664,32 @@ class WolfStrategyV1(IStrategy):
         **kwargs
     ) -> Optional[Union[str, bool]]:
         """
-        Short: Take profit only. No stop loss - stake is profit bucket money,
-               if liquidated we only lose house money, wallet stays intact.
-        Long: No custom exit - trailing stop + ROI + DCA handle everything.
+        Short: Take profit at target.
+        Long: Partial profit taking at threshold (sell ~50% signal).
         """
         if trade.is_short:
             tp = float(self.short_take_profit.value)
-
             if current_profit >= tp:
                 logger.info(
                     f"[SHORT_TP] {pair} - Profit: {current_profit:.4f}, TP: {tp}"
                 )
                 return f'short_tp_{current_profit:.4f}'
 
+        # Long: partial profit taking
+        if not trade.is_short:
+            pp_pct = float(self.partial_profit_pct.value)
+            if not self.partial_profit_taken.get(pair, False) and current_profit >= pp_pct:
+                self.partial_profit_taken[pair] = True
+                logger.info(
+                    f"[PARTIAL_TP] {pair} - Profit: {current_profit:.4f}, "
+                    f"taking partial at {pp_pct}"
+                )
+                return f'partial_tp_{current_profit:.4f}'
+
         return None
 
     # ================================================================
-    # CONFIRM TRADE EXIT (Profit Bucket Capture)
+    # CONFIRM TRADE EXIT (Profit Bucket Capture + Cooldown)
     # ================================================================
 
     def confirm_trade_exit(
@@ -475,13 +707,13 @@ class WolfStrategyV1(IStrategy):
         """
         On Long exit: capture profit into bucket for Short phase.
         On Short exit: reset state.
+        On Long loss: set cooldown.
         """
         profit = trade.calc_profit(rate)
 
         if not trade.is_short:
-            # Long exit - capture profit
+            # Long exit
             if profit > 0:
-                # Accumulate profit (don't replace, in case of multiple Long cycles)
                 existing = self.custom_profit_bucket.get(pair, 0.0)
                 self.custom_profit_bucket[pair] = existing + profit
                 self.awaiting_short[pair] = True
@@ -491,13 +723,21 @@ class WolfStrategyV1(IStrategy):
                     f"Short phase activated"
                 )
             else:
+                # Loss: set cooldown (4 hours = 16 candles at 15m)
+                cooldown_hours = 4
+                self.loss_cooldown_until[pair] = (
+                    current_time + datetime.timedelta(hours=cooldown_hours)
+                )
                 logger.info(
                     f"[LONG_EXIT_LOSS] {pair} - Loss: {profit:.2f}, "
+                    f"Cooldown until {self.loss_cooldown_until[pair]}, "
                     f"No Short activation"
                 )
             # Reset DCA state
             self.dca_count[pair] = 0
             self.last_buy_price.pop(pair, None)
+            self.last_dca_candle.pop(pair, None)
+            self.partial_profit_taken.pop(pair, None)
         else:
             # Short exit - log and reset
             bucket_used = self.custom_profit_bucket.get(pair, 0.0)
@@ -511,7 +751,7 @@ class WolfStrategyV1(IStrategy):
         return True
 
     # ================================================================
-    # INFORMATIVE PAIRS (not needed for single-pair)
+    # INFORMATIVE PAIRS
     # ================================================================
 
     def informative_pairs(self) -> List[Tuple[str, str]]:
