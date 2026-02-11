@@ -46,6 +46,9 @@ Thumbs.db
 # Docker
 *.tar
 
+# Backups
+*.bak
+
 # Environment
 .env
 .env.*

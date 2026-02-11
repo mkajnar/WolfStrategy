@@ -1,61 +1,61 @@
 """
 WolfStrategyV1 - Long -> Short Profit Flip Strategy
 =====================================================
-Complete trading strategy implementing sequential Long -> Short Profit Flip logic
-with dynamic DCA, Donchian Channels, Support Detection, and 100x Short leverage.
+Donchian Channel bounce Long with DCA + 100x Short on breakout down.
 
-Author: AI Assistant
-Version: 1.0.0
+Phases:
+  1. Long: Enter on Donchian lower bounce + RSI oversold + support
+     - DCA up to N positions, each lower than previous
+     - Exit via trailing stop or ROI
+  2. Short: Enter on Donchian breakout down after profitable Long exit
+     - 100x leverage, strict SL/TP
+     - Funded from profit bucket (Long phase profit)
+
+Version: 2.0.0
 """
 
 import datetime
 import logging
-from typing import Optional, Union, List, Tuple, Dict, Any
+from typing import Optional, Union, List, Tuple, Dict
 
 import numpy as np
-import pandas as pd
 import talib.abstract as ta
-from pandas import DataFrame, Series
+from pandas import DataFrame
 
-import freqtrade.vendor.qtpylib.indicators as qtpylib
-from freqtrade.persistence import Trade, CustomDataWrapper
+from freqtrade.persistence import Trade
 from freqtrade.strategy import (
-    DecimalParameter, IStrategy, IntParameter, BooleanParameter
+    DecimalParameter, IStrategy, IntParameter
 )
-
 
 logger = logging.getLogger(__name__)
 
 
 class WolfStrategyV1(IStrategy):
-    """
-    WolfStrategyV1 - Long -> Short Profit Flip Strategy
-
-    This strategy implements:
-    1. Long entry with Donchian Channel bounce from lower band
-    2. Dynamic DCA with support detection and price confirmation
-    3. Profit capture with automatic Short entry on Donchian breakout
-    4. 100x leverage for Short phase with strict risk management
-    """
 
     INTERFACE_VERSION = 3
+    can_short = True
+    timeframe = '15m'
 
+    # -- Minimal ROI: only for Long --
     minimal_roi = {
-        "0": 0.03
+        "0": 0.05,       # 5% default ROI
+        "60": 0.03,      # 3% after 60 min
+        "180": 0.015,    # 1.5% after 3h
+        "720": 0.005     # 0.5% after 12h
     }
 
-    leverage_value = 10
+    # -- Stoploss: effectively disabled, DCA handles drawdowns --
+    # At 2-5x leverage, -0.99 means price must drop ~50% to trigger
+    # We rely on DCA to average down and trailing stop to exit in profit
+    stoploss = -0.99
 
-    timeframe_hierarchy = {
-        '1m': '5m',
-        '5m': '15m',
-        '15m': '1h',
-        '1h': '4h',
-        '4h': '1d',
-        '1d': '1w',
-        '1w': '1M'
-    }
+    # -- Trailing stop for Long --
+    trailing_stop = True
+    trailing_only_offset_is_reached = True
+    trailing_stop_positive = 0.01       # 1% trailing
+    trailing_stop_positive_offset = 0.02  # activate after 2% profit
 
+    # -- Order types --
     order_types = {
         'entry': 'market',
         'exit': 'market',
@@ -63,84 +63,240 @@ class WolfStrategyV1(IStrategy):
         'stoploss_on_exchange': False
     }
 
-    stoploss = -0.5
-
+    # -- Signals --
     use_exit_signal = True
-    exit_profit_only = False
+    exit_profit_only = True  # Long exit signals fire only when in profit
 
-    trailing_stop = True
-    trailing_only_offset_is_reached = True
-    trailing_stop_positive = 0.003
-    trailing_stop_positive_offset = 0.008
-
+    # -- DCA --
     position_adjustment_enable = True
 
+    # ================================================================
+    # HYPEROPT PARAMETERS - BUY SPACE
+    # ================================================================
+    donchian_period = IntParameter(10, 50, default=20, space='buy', optimize=True)
+    rsi_oversold = IntParameter(20, 45, default=35, space='buy', optimize=True)
+    rsi_period = IntParameter(7, 21, default=14, space='buy', optimize=True)
+    atr_period = IntParameter(10, 20, default=14, space='buy', optimize=False)
+
+    # DCA parameters
+    dca_max_count = IntParameter(2, 8, default=5, space='buy', optimize=True)
+    dca_price_drop = DecimalParameter(0.01, 0.08, default=0.03, space='buy', optimize=True)
+    dca_multiplier = DecimalParameter(1.1, 2.5, default=1.5, space='buy', optimize=True)
+
+    # Long leverage
+    long_leverage_min = DecimalParameter(1.0, 3.0, default=2.0, space='buy', optimize=False)
+    long_leverage_max = DecimalParameter(3.0, 10.0, default=5.0, space='buy', optimize=False)
+
+    # ================================================================
+    # HYPEROPT PARAMETERS - SELL SPACE
+    # ================================================================
+    short_stop_loss = DecimalParameter(0.005, 0.015, default=0.009, space='sell', optimize=True)
+    short_take_profit = DecimalParameter(0.02, 0.06, default=0.03, space='sell', optimize=True)
+
+    # ================================================================
+    # RUNTIME STATE (not persisted across restarts in backtesting)
+    # ================================================================
     custom_profit_bucket: Dict[str, float] = {}
     awaiting_short: Dict[str, bool] = {}
     last_buy_price: Dict[str, float] = {}
     dca_count: Dict[str, int] = {}
-    support_levels: Dict[str, float] = {}
-    donchian_lower: Dict[str, float] = {}
-    donchian_upper: Dict[str, float] = {}
 
-    donchian_period = IntParameter(10, 50, default=20, space='buy', optimize=True)
-    dca_max_count = IntParameter(3, 10, default=5, space='buy', optimize=True)
-    dca_increment = DecimalParameter(1.2, 3.0, default=1.5, space='buy', optimize=True)
-    dca_price_drop = DecimalParameter(0.01, 0.1, default=0.03, space='buy', optimize=False)
-    support_confirmation_bars = IntParameter(2, 10, default=3, space='buy', optimize=False)
+    # ================================================================
+    # INDICATORS
+    # ================================================================
 
-    short_leverage = DecimalParameter(5.0, 20.0, default=10.0, space='sell', optimize=True)
-    short_stop_loss = DecimalParameter(0.01, 0.03, default=0.015, space='sell', optimize=True)
-    short_take_profit = DecimalParameter(0.03, 0.08, default=0.05, space='sell', optimize=True)
-    trailing_stop_activation = DecimalParameter(0.01, 0.03, default=0.015, space='sell', optimize=True)
-    taker_fee_reserve = DecimalParameter(0.001, 0.005, default=0.002, space='sell', optimize=False)
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        pair = metadata['pair']
 
-    atr_period = IntParameter(10, 30, default=14, space='buy', optimize=False)
-    rsi_period = IntParameter(10, 30, default=14, space='buy', optimize=False)
-    rsi_oversold = IntParameter(20, 50, default=35, space='buy', optimize=True)
-    macd_fast = IntParameter(8, 20, default=12, space='buy', optimize=False)
-    macd_slow = IntParameter(20, 40, default=26, space='buy', optimize=False)
-    macd_signal = IntParameter(5, 15, default=9, space='buy', optimize=False)
+        # -- Donchian Channels --
+        period = self.donchian_period.value
+        dataframe['dc_upper'] = dataframe['high'].rolling(window=period).max()
+        dataframe['dc_lower'] = dataframe['low'].rolling(window=period).min()
+        dataframe['dc_mid'] = (dataframe['dc_upper'] + dataframe['dc_lower']) / 2
 
-    long_leverage_min = DecimalParameter(2.0, 5.0, default=2.0, space='buy', optimize=True)
-    long_leverage_max = DecimalParameter(5.0, 10.0, default=5.0, space='buy', optimize=True)
+        # -- RSI --
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_period.value)
 
-    stake_amount_coef = DecimalParameter(0.1, 1.0, default=0.5, space='buy', optimize=True)
+        # -- ATR (for leverage calculation) --
+        dataframe['atr'] = ta.ATR(dataframe, timeperiod=self.atr_period.value)
+        dataframe['atr_pct'] = dataframe['atr'] / dataframe['close'] * 100
 
-    def custom_stake_amount(self, **kwargs) -> float:
+        # -- Volume SMA for confirmation --
+        dataframe['volume_sma'] = dataframe['volume'].rolling(window=20).mean()
+
+        # -- Support detection: rolling min of last N lows --
+        dataframe['support'] = dataframe['low'].rolling(window=50, min_periods=20).min()
+
+        # -- Donchian position: 0 = at lower, 1 = at upper --
+        dc_range = dataframe['dc_upper'] - dataframe['dc_lower']
+        dataframe['dc_position'] = (dataframe['close'] - dataframe['dc_lower']) / dc_range.replace(0, np.nan)
+
+        # -- Price near lower Donchian (within 1% of lower band) --
+        dataframe['near_dc_lower'] = (
+            dataframe['close'] <= dataframe['dc_lower'] * 1.01
+        )
+
+        # -- Donchian breakout down: close below previous lower --
+        dataframe['dc_breakout_down'] = (
+            (dataframe['close'] < dataframe['dc_lower'].shift(1)) &
+            (dataframe['close'].shift(1) >= dataframe['dc_lower'].shift(2))
+        )
+
+        # -- Bearish momentum for Short confirmation --
+        dataframe['bear_candle'] = (
+            (dataframe['close'] < dataframe['open']) &
+            (dataframe['close'].shift(1) < dataframe['open'].shift(1))
+        )
+
+        return dataframe
+
+    # ================================================================
+    # ENTRY SIGNALS
+    # ================================================================
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+
+        # -- LONG: Donchian lower bounce + RSI oversold --
+        long_conditions = (
+            (dataframe['near_dc_lower']) &
+            (dataframe['rsi'] < self.rsi_oversold.value) &
+            (dataframe['volume'] > 0) &
+            (dataframe['volume'] > dataframe['volume_sma'] * 0.5)
+        )
+        dataframe.loc[long_conditions, ['enter_long', 'enter_tag']] = (1, 'long_dc_bounce')
+
+        # -- SHORT: Donchian breakout down --
+        # Note: In backtesting, profit bucket check happens in confirm_trade_entry
+        short_conditions = (
+            (dataframe['dc_breakout_down']) &
+            (dataframe['bear_candle']) &
+            (dataframe['rsi'] > 30) &  # not already extremely oversold
+            (dataframe['volume'] > dataframe['volume_sma'])
+        )
+        dataframe.loc[short_conditions, ['enter_short', 'enter_tag']] = (1, 'short_dc_breakout')
+
+        return dataframe
+
+    # ================================================================
+    # EXIT SIGNALS
+    # ================================================================
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+
+        # -- LONG EXIT: Price reaches upper Donchian or RSI overbought --
+        long_exit = (
+            (dataframe['close'] >= dataframe['dc_upper'] * 0.99) |
+            (dataframe['rsi'] > 75)
+        ) & (dataframe['volume'] > 0)
+        dataframe.loc[long_exit, ['exit_long', 'exit_tag']] = (1, 'long_dc_upper')
+
+        # -- SHORT EXIT is handled by custom_exit (SL/TP), not signals --
+        # But add emergency signal exit if price goes way above entry
+        short_exit = (
+            (dataframe['close'] > dataframe['dc_upper']) &
+            (dataframe['rsi'] > 70)
+        )
+        dataframe.loc[short_exit, ['exit_short', 'exit_tag']] = (1, 'short_emergency_signal')
+
+        return dataframe
+
+    # ================================================================
+    # CONFIRM TRADE ENTRY (runtime gate for Short)
+    # ================================================================
+
+    def confirm_trade_entry(
+        self,
+        pair: str,
+        order_type: str,
+        amount: float,
+        rate: float,
+        time_in_force: str,
+        current_time: datetime.datetime,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs
+    ) -> bool:
         """
-        Calculate custom stake amount with proper risk management.
-
-        Strategy:
-        - 40% of available balance for trading
-        - Split across max DCA positions
-        - Multiplied by hyperopt coefficient
-        - Taker fee reserve included
+        Gate Short entries: only allow if profit bucket > 0.
+        Always allow Long entries.
         """
-        try:
-            balance = self.wallets.get_total_stake_amount()
-            risk_balance = balance * 0.40
-
-            num_positions = self.dca_max_count.value + 1
-            per_position = risk_balance / num_positions
-
-            adjusted_position = per_position * self.stake_amount_coef.value
-
-            fee_reserve = adjusted_position * self.taker_fee_reserve.value
-            final_stake = adjusted_position - fee_reserve
-
-            min_stake = self.config.get("min_stake_amount", 30)
+        if side == 'short':
+            profit = self.custom_profit_bucket.get(pair, 0.0)
+            if profit <= 0:
+                logger.info(
+                    f"[SHORT_BLOCKED] {pair} - No profit bucket ({profit:.2f}), "
+                    f"blocking Short entry"
+                )
+                return False
 
             logger.info(
-                f"[CUSTOM_STAKE] Balance: {balance:.2f}, Risk: {risk_balance:.2f}, "
-                f"Positions: {num_positions}, Final: {final_stake:.2f}, Min: {min_stake}"
+                f"[SHORT_ENTRY] {pair} - Profit bucket: {profit:.2f}, "
+                f"allowing Short at {rate:.2f}"
             )
+            # Reset awaiting flag
+            self.awaiting_short[pair] = False
+            return True
 
-            return max(final_stake, min_stake)
+        # Long: always allow, reset DCA state
+        if side == 'long':
+            self.dca_count[pair] = 0
+            self.last_buy_price[pair] = rate
+            logger.info(f"[LONG_ENTRY] {pair} - Entry at {rate:.2f}")
+
+        return True
+
+    # ================================================================
+    # CUSTOM STAKE AMOUNT
+    # ================================================================
+
+    def custom_stake_amount(
+        self,
+        current_time: datetime.datetime,
+        current_rate: float,
+        proposed_stake: float,
+        min_stake: Optional[float],
+        max_stake: float,
+        leverage: float,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs
+    ) -> float:
+        """
+        Long: Divide wallet across DCA positions.
+        Short: Use profit bucket amount.
+        """
+        try:
+            if side == 'short':
+                pair = kwargs.get('pair', '')
+                profit = self.custom_profit_bucket.get(pair, 0.0)
+                if profit <= 0:
+                    return min_stake or 30.0
+                # Use profit as stake for Short (with 100x leverage = huge position)
+                short_stake = max(profit * 0.9, min_stake or 30.0)
+                short_stake = min(short_stake, max_stake)
+                logger.info(f"[SHORT_STAKE] {pair} - Stake: {short_stake:.2f} from bucket: {profit:.2f}")
+                return short_stake
+
+            # Long: split wallet for DCA room
+            balance = self.wallets.get_total_stake_amount()
+            num_positions = self.dca_max_count.value + 1  # initial + DCA slots
+            per_position = balance * 0.8 / num_positions  # 80% of wallet, split
+            final = max(per_position, min_stake or 30.0)
+            final = min(final, max_stake)
+
+            logger.info(
+                f"[LONG_STAKE] Balance: {balance:.2f}, "
+                f"Positions: {num_positions}, Stake: {final:.2f}"
+            )
+            return final
 
         except Exception as e:
             logger.error(f"Error in custom_stake_amount: {e}")
-            return self.config.get("min_stake_amount", 30)
+            return proposed_stake
+
+    # ================================================================
+    # LEVERAGE
+    # ================================================================
 
     def leverage(
         self,
@@ -154,299 +310,41 @@ class WolfStrategyV1(IStrategy):
         **kwargs
     ) -> float:
         """
-        Dynamic leverage based on side and strategy requirements.
-
-        Long: 2-5x based on ATR volatility
-        Short: Fixed 100x (strict requirement)
+        Long: Dynamic 2-5x based on ATR volatility.
+        Short: Fixed 100x.
         """
+        if side == 'short':
+            lev = min(100.0, max_leverage)
+            logger.info(f"[LEVERAGE] {pair} Short: {lev}x")
+            return lev
+
+        # Long: lower leverage when volatility is high
         try:
-            if side == "short":
-                short_lev = float(self.short_leverage.value)
-                logger.info(
-                    f"[LEVERAGE] {pair} Short: Using {short_lev}x leverage (fixed for Short phase)"
-                )
-                return min(short_lev, max_leverage)
-
-            atr_percent = getattr(self, f'{pair}_atr_percent', 1.0)
-
-            base_leverage = 1.0
-
-            final_leverage = min(base_leverage, max_leverage)
-
-            logger.info(
-                f"[LEVERAGE] {pair} Long: ATR={atr_percent:.2f}%, "
-                f"Base={base_leverage}x, Final={final_leverage}x"
-            )
-
-            return final_leverage
-
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if not dataframe.empty:
+                atr_pct = dataframe.iloc[-1].get('atr_pct', 1.0)
+                # High ATR -> lower leverage, Low ATR -> higher leverage
+                lev_min = float(self.long_leverage_min.value)
+                lev_max = float(self.long_leverage_max.value)
+                if atr_pct > 2.0:
+                    lev = lev_min
+                elif atr_pct < 0.5:
+                    lev = lev_max
+                else:
+                    # Linear interpolation: high ATR -> low leverage
+                    ratio = (2.0 - atr_pct) / 1.5
+                    lev = lev_min + ratio * (lev_max - lev_min)
+                lev = min(lev, max_leverage)
+                logger.info(f"[LEVERAGE] {pair} Long: {lev:.1f}x (ATR%: {atr_pct:.2f})")
+                return lev
         except Exception as e:
             logger.error(f"Error in leverage: {e}")
-            return 3.0
 
-    def calculate_donchian_channels(self, dataframe: DataFrame, period: int) -> Tuple[Series, Series]:
-        """Calculate Donchian Channels (Upper and Lower bands)."""
-        upper = dataframe['high'].rolling(window=period, min_periods=period).max()
-        lower = dataframe['low'].rolling(window=period, min_periods=period).min()
-        return upper, lower
+        return min(3.0, max_leverage)
 
-    def detect_support_levels(
-        self,
-        dataframe: DataFrame,
-        lookback: int = 20
-    ) -> Series:
-        """
-        Detect support levels using local minima (Fractals/Pivot Lows).
-
-        A support level is detected when:
-        - Current low is lower than 'lookback' previous lows
-        - And lower than 'lookback' subsequent lows
-        """
-        supports = pd.Series(index=dataframe.index, dtype=float)
-
-        for i in range(lookback, len(dataframe) - lookback):
-            current_low = dataframe['low'].iloc[i]
-            past_lows = dataframe['low'].iloc[i - lookback:i]
-            future_lows = dataframe['low'].iloc[i + 1:i + lookback + 1]
-
-            if current_low < past_lows.min() and current_low < future_lows.min():
-                supports.iloc[i] = current_low
-
-        return supports
-
-    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Populate all required indicators:
-        - Donchian Channels (20 period)
-        - Support Levels (Fractals/Pivot Lows)
-        - ATR (for leverage)
-        - RSI (for momentum)
-        - MACD (for trend confirmation)
-        """
-        pair = metadata['pair']
-
-        donchian_period = self.donchian_period.value
-        upper, lower = self.calculate_donchian_channels(dataframe, donchian_period)
-        dataframe['donchian_upper'] = upper
-        dataframe['donchian_lower'] = lower
-        dataframe['donchian_middle'] = (upper + lower) / 2
-
-        self.donchian_lower[pair] = lower.iloc[-1]
-        self.donchian_upper[pair] = upper.iloc[-1]
-
-        supports = self.detect_support_levels(dataframe, lookback=10)
-        dataframe['support_level'] = supports
-
-        last_support = supports.dropna().iloc[-1] if not supports.dropna().empty else 0.0
-        self.support_levels[pair] = last_support
-
-        atr_period = self.atr_period.value
-        dataframe['atr'] = ta.ATR(dataframe, timeperiod=atr_period)
-
-        close_price = dataframe['close'].iloc[-1]
-        atr_value = dataframe['atr'].iloc[-1]
-
-        if close_price > 0:
-            atr_percent = (atr_value / close_price) * 100
-            setattr(self, f'{pair}_atr_percent', atr_percent)
-            logger.info(
-                f"[INDICATORS] {pair} - ATR%: {atr_percent:.2f}%, "
-                f"DC_Upper: {upper.iloc[-1]:.6f}, DC_Lower: {lower.iloc[-1]:.6f}, "
-                f"Support: {last_support:.6f}" if last_support > 0 else "Support: None"
-            )
-        else:
-            setattr(self, f'{pair}_atr_percent', 1.0)
-
-        rsi_period = self.rsi_period.value
-        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=rsi_period)
-
-        macd_fast = self.macd_fast.value
-        macd_slow = self.macd_slow.value
-        macd_signal_period = self.macd_signal.value
-
-        macd = ta.MACD(
-            dataframe,
-            fastperiod=macd_fast,
-            slowperiod=macd_slow,
-            signalperiod=macd_signal_period
-        )
-        dataframe['macd'] = macd['macd']
-        dataframe['macdsignal'] = macd['macdsignal']
-        dataframe['macdhist'] = macd['macdhist']
-
-        dataframe['rsi_oversold'] = dataframe['rsi'] < self.rsi_oversold.value
-
-        dataframe['price_vs_donchian'] = (
-            (dataframe['close'] - dataframe['donchian_lower']) /
-            (dataframe['donchian_upper'] - dataframe['donchian_lower'] + 1e-10)
-        )
-
-        dataframe['support_bounce'] = (
-            (dataframe['close'] > dataframe['support_level'].shift(1)) &
-            (dataframe['low'] <= dataframe['support_level']) &
-            (dataframe['rsi'] < 50)
-        )
-
-        dataframe['donchian_breakout_down'] = (
-            dataframe['close'] < dataframe['donchian_lower'].shift(1)
-        )
-
-        return dataframe
-
-    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Define entry signals for both Long and Short phases.
-
-        Long Entry: Bounce from lower Donchian Channel or Support with RSI oversold
-        Short Entry: Donchian breakout down (after profit capture)
-        """
-        pair = metadata['pair']
-
-        conditions_long = []
-        conditions_short = []
-
-        conditions_long.append(dataframe['volume'] > 0)
-
-        donchian_touch = dataframe['close'] <= dataframe['donchian_lower']
-        support_condition = dataframe['support_bounce']
-        rsi_condition = dataframe['rsi'] < 50
-
-        conditions_long.append(donchian_touch | support_condition)
-        conditions_long.append(rsi_condition)
-
-        if conditions_long:
-            long_condition = pd.concat(conditions_long, axis=1).all(axis=1)
-            dataframe.loc[long_condition, ['enter_long', 'enter_tag']] = (
-                1, 'WOLF_LONG_DONCHIAN_BOUNCE'
-            )
-
-        if pair in self.awaiting_short and self.awaiting_short[pair]:
-            pass  # SHORT TEMPORARILY DISABLED - Long with trailing stop is profitable
-
-        return dataframe
-
-    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Define exit signals.
-
-        Long Exit: Strong move to upper Donchian or RSI overbought
-        Short Exit: Price returns above lower Donchian or stop loss hit
-        """
-        conditions_long_exit = []
-        conditions_short_exit = []
-
-        conditions_long_exit.append(
-            (dataframe['close'] >= dataframe['donchian_upper']) |
-            (dataframe['rsi'] > 70)
-        )
-        conditions_long_exit.append(dataframe['volume'] > 0)
-
-        if conditions_long_exit:
-            long_exit_condition = pd.concat(conditions_long_exit, axis=1).all(axis=1)
-            dataframe.loc[long_exit_condition, ['exit_long', 'exit_tag']] = (
-                1, 'WOLF_LONG_TAKE_PROFIT'
-            )
-
-        conditions_short_exit.append(
-            (dataframe['close'] >= dataframe['donchian_lower'].shift(1)) &
-            (dataframe['close'] > dataframe['donchian_lower'])
-        )
-        conditions_short_exit.append(dataframe['volume'] > 0)
-
-        if conditions_short_exit:
-            short_exit_condition = pd.concat(conditions_short_exit, axis=1).all(axis=1)
-            dataframe.loc[short_exit_condition, ['exit_short', 'exit_tag']] = (
-                1, 'WOLF_SHORT_EXIT'
-            )
-
-        return dataframe
-
-    def confirm_trade_exit(
-        self,
-        pair: str,
-        trade: Trade,
-        order_type: str,
-        amount: float,
-        rate: float,
-        time_in_force: str,
-        exit_reason: str,
-        current_time: datetime.datetime,
-        **kwargs
-    ) -> bool:
-        """
-        Confirm trade exit and handle profit capture for Short phase.
-
-        Calculates net profit from Long position and stores for Short entry.
-        """
-        try:
-            profit_ratio = trade.calc_profit_ratio(rate)
-            profit_abs = trade.calc_profit(rate)
-
-            net_profit = profit_abs - (amount * rate * self.taker_fee_reserve.value)
-
-            self.custom_profit_bucket[pair] = net_profit
-
-            logger.info(
-                f"[TRADE_EXIT] {pair} - Exit Reason: {exit_reason}, "
-                f"Profit Ratio: {profit_ratio:.4f}, Net Profit: {net_profit:.4f}, "
-                f"Stored in Profit Bucket: {self.custom_profit_bucket.get(pair, 0):.4f}"
-            )
-
-            if net_profit > 0:
-                self.awaiting_short[pair] = True
-                logger.info(
-                    f"[PROFIT_CAPTURE] {pair} - Profit captured: {net_profit:.4f}, "
-                    f"Activating Short phase. Waiting for Donchian breakout."
-                )
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in confirm_trade_exit: {e}")
-            return True
-
-    def custom_exit(
-        self,
-        pair: str,
-        trade: Trade,
-        current_time: datetime.datetime,
-        current_rate: float,
-        current_profit: float,
-        **kwargs
-    ) -> Optional[Union[str, bool]]:
-        """
-        Custom exit logic for emergency situations.
-
-        Long: Liquidation protection
-        Short: Strict 0.8-0.9% stop loss
-        """
-        try:
-            if trade.is_short:
-                sl_price = trade.open_rate * (1 + float(self.short_stop_loss.value))
-                tp_price = trade.open_rate * (1 - float(self.short_take_profit.value))
-                
-                logger.info(
-                    f"[SHORT_EXIT_CHECK] {pair} - Entry: {trade.open_rate:.6f}, "
-                    f"Current: {current_rate:.6f}, SL: {sl_price:.6f}, TP: {tp_price:.6f}"
-                )
-                
-                if current_rate >= sl_price:
-                    logger.info(f"[SHORT_SL] {pair} - Stop loss triggered at {current_rate:.6f}")
-                    return f"short_emergency_sl_{sl_price:.6f}"
-                
-                if current_rate <= tp_price:
-                    logger.info(f"[SHORT_TP] {pair} - Take profit triggered at {current_rate:.6f}")
-                    return f"short_take_profit_{tp_price:.6f}"
-
-            liquidation_price = trade.liquidation_price
-            if liquidation_price > 0 and current_rate <= liquidation_price * 1.02:
-                return f"liquidation_protection_{liquidation_price:.6f}"
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Error in custom_exit: {e}")
-            return None
+    # ================================================================
+    # DCA (adjust_trade_position)
+    # ================================================================
 
     def adjust_trade_position(
         self,
@@ -463,216 +361,158 @@ class WolfStrategyV1(IStrategy):
         **kwargs
     ) -> Optional[float]:
         """
-        Dynamic DCA logic for Long positions.
-
-        Rules:
-        1. Only DCA if current_price < last_buy_price
-        2. Confirm bounce from deeper support
-        3. Max DCA count limit respected
-        4. Each DCA increases position size to reduce average price
+        DCA for Long only:
+        1. Price must be below last buy price by dca_price_drop %
+        2. RSI must be oversold (support confirmation)
+        3. Max dca_max_count positions
         """
-        try:
-            pair = trade.pair
+        pair = trade.pair
 
-            if trade.is_short:
-                logger.info(f"[DCA] {pair} - Short position, skipping DCA")
-                return None
-
-            current_dca_count = self.dca_count.get(pair, 0)
-            max_dca = self.dca_max_count.value
-
-            if current_dca_count >= max_dca:
-                logger.info(
-                    f"[DCA] {pair} - Max DCA reached ({current_dca_count}/{max_dca}), skipping"
-                )
-                return None
-
-            last_price = self.last_buy_price.get(pair, trade.open_rate)
-
-            price_drop_required = current_rate < (last_price * (1 - self.dca_price_drop.value))
-
-            if not price_drop_required:
-                logger.info(
-                    f"[DCA] {pair} - Price drop not sufficient. "
-                    f"Current: {current_rate:.6f}, Last Buy: {last_price:.6f}, "
-                    f"Required drop: {self.dca_price_drop.value * 100:.1f}%"
-                )
-                return None
-
-            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-            if dataframe.empty:
-                logger.warning(f"[DCA] {pair} - Empty dataframe, skipping DCA")
-                return None
-
-            last_candle = dataframe.iloc[-1]
-
-            support_confirmed = False
-            support_level = self.support_levels.get(pair, 0)
-
-            if support_level > 0:
-                price_above_support = current_rate > support_level
-                rsi_oversold = last_candle.get('rsi_oversold', False)
-                macd_bullish = last_candle.get('macd', 0) > last_candle.get('macdsignal', 0)
-
-                support_confirmed = price_above_support and (rsi_oversold or macd_bullish)
-
-                logger.info(
-                    f"[DCA] {pair} - Support Analysis: Price={current_rate:.6f}, "
-                    f"Support={support_level:.6f}, Above Support={price_above_support}, "
-                    f"RSI Oversold={rsi_oversold}, MACD Bullish={macd_bullish}"
-                )
-            else:
-                price_bounce = current_rate > last_candle.get('donchian_lower', current_rate)
-                support_confirmed = price_bounce and last_candle.get('rsi_oversold', False)
-
-            if not support_confirmed:
-                logger.info(
-                    f"[DCA] {pair} - Support confirmation not met, skipping DCA"
-                )
-                return None
-
-            available_stake = self.wallets.get_available_stake_amount()
-
-            dca_increment = float(self.dca_increment.value)
-            dca_amount = available_stake * (dca_increment ** (current_dca_count + 1))
-
-            dca_amount = min(dca_amount, max_stake)
-            dca_amount = max(dca_amount, min_stake if min_stake else 30)
-
-            self.last_buy_price[pair] = current_rate
-            self.dca_count[pair] = current_dca_count + 1
-
-            logger.info(
-                f"[DCA_EXECUTED] {pair} - DCA #{current_dca_count + 1}/{max_dca} | "
-                f"Price: {current_rate:.6f} | "
-                f"Amount: {dca_amount:.4f} | "
-                f"Profit Bucket: {self.custom_profit_bucket.get(pair, 0):.4f}"
-            )
-
-            return dca_amount
-
-        except Exception as e:
-            logger.error(f"Error in adjust_trade_position: {e}")
+        # No DCA for Short
+        if trade.is_short:
             return None
 
-    def get_dca_list(self, trade: Trade) -> List[float]:
-        """Get list of DCA prices for a trade."""
+        count = self.dca_count.get(pair, 0)
+        max_dca = self.dca_max_count.value
+
+        if count >= max_dca:
+            return None
+
+        # Price must be lower than last buy
+        last_price = self.last_buy_price.get(pair, None) or trade.open_rate
+        required_price = last_price * (1.0 - float(self.dca_price_drop.value))
+
+        if current_rate >= required_price:
+            return None
+
+        # Get dataframe for RSI confirmation
         try:
-            dcas = CustomDataWrapper.get_custom_data(trade_id=trade.id, key="DCA")
-            if dcas:
-                return dcas[0].value
-        except Exception as ex:
-            logger.debug(f"No DCA list found: {ex}")
-        return []
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if dataframe.empty:
+                return None
+            last_candle = dataframe.iloc[-1]
 
-    def set_dca_list(self, trade: Trade, dca_list: List[float]) -> None:
-        """Store DCA prices for a trade."""
+            # RSI must be below threshold (oversold = support bounce likely)
+            rsi = last_candle.get('rsi', 50)
+            if rsi > self.rsi_oversold.value + 10:  # Give some room above oversold
+                logger.info(
+                    f"[DCA_SKIP] {pair} #{count+1} - RSI {rsi:.1f} too high "
+                    f"(need < {self.rsi_oversold.value + 10})"
+                )
+                return None
+        except Exception:
+            return None
+
+        # Calculate DCA stake with multiplier
         try:
-            CustomDataWrapper.set_custom_data(trade_id=trade.id, key="DCA", value=dca_list)
-        except Exception as e:
-            logger.error(f"Error setting DCA list: {e}")
+            available = self.wallets.get_available_stake_amount()
+            multiplier = float(self.dca_multiplier.value)
+            base_stake = trade.stake_amount  # original stake of the trade
+            dca_stake = base_stake * (multiplier ** (count + 1)) / multiplier
+            dca_stake = min(dca_stake, available * 0.5)  # max 50% of remaining
+            dca_stake = min(dca_stake, max_stake)
+            dca_stake = max(dca_stake, min_stake or 30.0)
+        except Exception:
+            dca_stake = min_stake or 30.0
 
-    def get_custom_profit(self, pair: str) -> float:
-        """Get stored profit from profit bucket."""
-        return self.custom_profit_bucket.get(pair, 0.0)
+        # Update state
+        self.last_buy_price[pair] = current_rate
+        self.dca_count[pair] = count + 1
 
-    def informative_pairs(self) -> List[Tuple[str, str]]:
-        """Define informative pairs for multi-timeframe analysis."""
-        pairs = self.dp.current_whitelist()
-        informative_pairs = [
-            (pair, timeframe)
-            for pair in pairs
-            for timeframe in self.timeframe_hierarchy.keys()
-        ]
-        return informative_pairs
+        logger.info(
+            f"[DCA] {pair} #{count+1}/{max_dca} - "
+            f"Price: {current_rate:.2f} (last: {last_price:.2f}), "
+            f"RSI: {rsi:.1f}, Stake: {dca_stake:.2f}"
+        )
 
-    def check_short_entry_conditions(
+        return dca_stake
+
+    # ================================================================
+    # CUSTOM EXIT (Short TP only - no SL, let it ride or liquidate)
+    # ================================================================
+
+    def custom_exit(
         self,
         pair: str,
-        dataframe: DataFrame,
-        current_rate: float
+        trade: Trade,
+        current_time: datetime.datetime,
+        current_rate: float,
+        current_profit: float,
+        **kwargs
+    ) -> Optional[Union[str, bool]]:
+        """
+        Short: Take profit only. No stop loss - stake is profit bucket money,
+               if liquidated we only lose house money, wallet stays intact.
+        Long: No custom exit - trailing stop + ROI + DCA handle everything.
+        """
+        if trade.is_short:
+            tp = float(self.short_take_profit.value)
+
+            if current_profit >= tp:
+                logger.info(
+                    f"[SHORT_TP] {pair} - Profit: {current_profit:.4f}, TP: {tp}"
+                )
+                return f'short_tp_{current_profit:.4f}'
+
+        return None
+
+    # ================================================================
+    # CONFIRM TRADE EXIT (Profit Bucket Capture)
+    # ================================================================
+
+    def confirm_trade_exit(
+        self,
+        pair: str,
+        trade: Trade,
+        order_type: str,
+        amount: float,
+        rate: float,
+        time_in_force: str,
+        exit_reason: str,
+        current_time: datetime.datetime,
+        **kwargs
     ) -> bool:
         """
-        Check if Short entry conditions are met.
-
-        Conditions:
-        1. Profit bucket has positive profit
-        2. Awaiting short flag is True
-        3. Price broke below lower Donchian Channel
+        On Long exit: capture profit into bucket for Short phase.
+        On Short exit: reset state.
         """
-        if not self.awaiting_short.get(pair, False):
-            return False
+        profit = trade.calc_profit(rate)
 
-        profit = self.custom_profit_bucket.get(pair, 0.0)
-        if profit <= 0:
-            self.awaiting_short[pair] = False
-            return False
-
-        donchian_lower = self.donchian_lower.get(pair, 0.0)
-        if donchian_lower == 0:
-            return False
-
-        breakout_down = current_rate < donchian_lower
-
-        logger.info(
-            f"[SHORT_CHECK] {pair} - Profit: {profit:.4f}, "
-            f"DC_Lower: {donchian_lower:.6f}, Current: {current_rate:.6f}, "
-            f"Breakout: {breakout_down}"
-        )
-
-        return breakout_down
-
-    def short_stake_amount(self, pair: str) -> float:
-        """
-        Calculate stake amount for Short entry based on profit bucket.
-
-        Uses profit from Long phase as notional for Short.
-        """
-        profit = self.custom_profit_bucket.get(pair, 0.0)
-
-        if profit <= 0:
-            return self.config.get("min_stake_amount", 30)
-
-        available_balance = self.wallets.get_total_stake_amount()
-
-        short_stake = min(profit * 100, available_balance * 0.3)
-
-        min_stake = self.config.get("min_stake_amount", 30)
-
-        logger.info(
-            f"[SHORT_STAKE] {pair} - Profit Bucket: {profit:.4f}, "
-            f"Calculated Stake: {short_stake:.4f}, Min: {min_stake}"
-        )
-
-        return max(short_stake, min_stake)
-
-    def reset_short_state(self, pair: str) -> None:
-        """Reset Short phase state after trade completion."""
-        self.awaiting_short[pair] = False
-        if pair in self.custom_profit_bucket:
-            del self.custom_profit_bucket[pair]
-        logger.info(f"[SHORT_RESET] {pair} - Short state reset")
-
-    def log_strategy_state(self, pair: str) -> None:
-        """Log current strategy state for monitoring."""
-        state = {
-            'profit_bucket': self.custom_profit_bucket.get(pair, 0.0),
-            'awaiting_short': self.awaiting_short.get(pair, False),
-            'last_buy_price': self.last_buy_price.get(pair, 0.0),
-            'dca_count': self.dca_count.get(pair, 0),
-            'donchian_lower': self.donchian_lower.get(pair, 0.0),
-            'donchian_upper': self.donchian_upper.get(pair, 0.0),
-            'support_level': self.support_levels.get(pair, 0.0),
-        }
-        logger.info(f"[STRATEGY_STATE] {pair} - {state}")
-
-    def start_of_cycle(self, pair: str) -> None:
-        """Initialize pair-specific state at start of trading cycle."""
-        if pair not in self.dca_count:
+        if not trade.is_short:
+            # Long exit - capture profit
+            if profit > 0:
+                # Accumulate profit (don't replace, in case of multiple Long cycles)
+                existing = self.custom_profit_bucket.get(pair, 0.0)
+                self.custom_profit_bucket[pair] = existing + profit
+                self.awaiting_short[pair] = True
+                logger.info(
+                    f"[PROFIT_CAPTURE] {pair} - Long profit: {profit:.2f}, "
+                    f"Total bucket: {self.custom_profit_bucket[pair]:.2f}, "
+                    f"Short phase activated"
+                )
+            else:
+                logger.info(
+                    f"[LONG_EXIT_LOSS] {pair} - Loss: {profit:.2f}, "
+                    f"No Short activation"
+                )
+            # Reset DCA state
             self.dca_count[pair] = 0
-        if pair not in self.awaiting_short:
-            self.awaiting_short[pair] = False
-        if pair not in self.custom_profit_bucket:
+            self.last_buy_price.pop(pair, None)
+        else:
+            # Short exit - log and reset
+            bucket_used = self.custom_profit_bucket.get(pair, 0.0)
             self.custom_profit_bucket[pair] = 0.0
+            self.awaiting_short[pair] = False
+            logger.info(
+                f"[SHORT_EXIT] {pair} - Profit: {profit:.2f}, "
+                f"Bucket used: {bucket_used:.2f}, State reset"
+            )
 
-        self.log_strategy_state(pair)
+        return True
+
+    # ================================================================
+    # INFORMATIVE PAIRS (not needed for single-pair)
+    # ================================================================
+
+    def informative_pairs(self) -> List[Tuple[str, str]]:
+        return []

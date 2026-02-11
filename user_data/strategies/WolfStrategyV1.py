@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 class WolfStrategyV1(IStrategy):
 
     INTERFACE_VERSION = 3
+    can_short = True
     timeframe = '15m'
 
     # -- Minimal ROI: only for Long --

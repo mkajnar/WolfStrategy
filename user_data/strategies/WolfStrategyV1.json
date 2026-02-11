@@ -11,30 +11,30 @@
       "atr_period": 14,
       "long_leverage_max": 5.0,
       "long_leverage_min": 2.0,
-      "dca_max_count": 8,
-      "dca_multiplier": 1.333,
-      "dca_price_drop": 0.011,
-      "donchian_period": 16,
+      "dca_max_count": 7,
+      "dca_multiplier": 2.421,
+      "dca_price_drop": 0.035,
+      "donchian_period": 32,
       "rsi_oversold": 44,
       "rsi_period": 21
     },
     "sell": {
-      "short_stop_loss": 0.007,
-      "short_take_profit": 0.034
+      "short_stop_loss": 0.012,
+      "short_take_profit": 0.031
     },
     "roi": {
-      "0": 0.217,
-      "24": 0.071,
-      "47": 0.031,
-      "117": 0
+      "0": 0.347,
+      "106": 0.159,
+      "222": 0.056,
+      "556": 0
     },
     "trailing": {
       "trailing_stop": true,
-      "trailing_stop_positive": 0.189,
-      "trailing_stop_positive_offset": 0.19,
+      "trailing_stop_positive": 0.084,
+      "trailing_stop_positive_offset": 0.179,
       "trailing_only_offset_is_reached": false
     }
   },
   "ft_stratparam_v": 1,
-  "export_time": "2026-02-11 02:29:36.201380+00:00"
+  "export_time": "2026-02-11 04:53:55.747010+00:00"
 }
