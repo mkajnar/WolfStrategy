@@ -28,7 +28,7 @@
     "margin_mode": "isolated",
 
     "dry_run": true,
-    "dry_run_wallet": 10000,
+    "dry_run_wallet": 300,
 
     "stake_currency": "USDT",
     "stake_amount": "unlimited",
