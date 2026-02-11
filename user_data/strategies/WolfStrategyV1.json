@@ -11,9 +11,9 @@
       "stoploss": -0.99
     },
     "trailing": {
-      "trailing_stop": true,
-      "trailing_stop_positive": 0.023,
-      "trailing_stop_positive_offset": 0.067,
+      "trailing_stop": false,
+      "trailing_stop_positive": 0.0,
+      "trailing_stop_positive_offset": 0.0,
       "trailing_only_offset_is_reached": false
     },
     "max_open_trades": {
@@ -21,7 +21,7 @@
     },
     "buy": {
       "atr_period": 14,
-      "long_leverage_max": 5.0,
+      "long_leverage_max": 7.0,
       "long_leverage_min": 2.0,
       "dca_base_drop": 0.049,
       "dca_cooling_candles": 2,

@@ -84,6 +84,13 @@
     "datadir": "user_data/data/bybit",
     "user_data_dir": "user_data",
 
-    "liquidation_buffer": 0.05,
-    "position_adjustment_enable": true
+    "liquidation_buffer": 0.10,
+    "position_adjustment_enable": true,
+
+    "order_types": {
+        "entry": "market",
+        "exit": "market",
+        "stoploss": "market",
+        "stoploss_on_exchange": true
+    }
 }
