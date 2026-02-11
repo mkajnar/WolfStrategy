@@ -1,0 +1,89 @@
+{
+    "strategy": "WolfStrategyV1",
+    "strategy_path": "user_data/strategies",
+    "bot_name": "WolfStrategyV1",
+    "initial_state": "running",
+    "force_entry_enable": false,
+    "disable_dataframe_checks": false,
+
+    "exchange": {
+        "name": "bybit",
+        "key": "",
+        "secret": "",
+        "password": "",
+        "pair_whitelist": [
+            "BTC/USDT:USDT"
+        ],
+        "ccxt_config": {
+            "enableRateLimit": true,
+            "rateLimit": 200
+        },
+        "ccxt_async_config": {
+            "enableRateLimit": true,
+            "rateLimit": 200
+        }
+    },
+
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+
+    "dry_run": true,
+    "dry_run_wallet": 10000,
+
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "fiat_display_currency": "USD",
+    "max_open_trades": 1,
+
+    "timeframe": "15m",
+
+    "entry_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+
+    "exit_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+
+    "unfilledtimeout": {
+        "entry": 30,
+        "exit": 30
+    },
+
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+
+    "telegram": {
+        "enabled": false,
+        "token": "PLACEHOLDER",
+        "chat_id": "PLACEHOLDER"
+    },
+
+    "api_server": {
+        "enabled": false,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8080,
+        "verbosity": "error",
+        "username": "wolf",
+        "password": "wolf"
+    },
+
+    "datadir": "user_data/data/bybit",
+    "user_data_dir": "user_data",
+
+    "liquidation_buffer": 0.05,
+    "position_adjustment_enable": true
+}

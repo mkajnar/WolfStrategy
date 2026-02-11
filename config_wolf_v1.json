@@ -1,0 +1,331 @@
+{
+    "strategy": "WolfStrategyV1",
+    "strategy_path": "user_data/strategies",
+    "freqaimodel": null,
+    "instrument_split": {
+        "method": "StaticPairList",
+        "config": {}
+    },
+    "pair_whitelist": {
+        "method": "VolumePairList",
+        "config": {
+            "number_assets": 20,
+            "stake_currency": "USDT",
+            "fiat_display_currency": "USD",
+            "refresh_period": 1800
+        }
+    },
+    "telegram": {
+        "enabled": true,
+        "token": "${TELEGRAM_TOKEN}",
+        "chat_id": "${TELEGRAM_CHAT_ID}",
+        "notification_setting": {
+            "trade_opened": true,
+            "trade_closed": true,
+            "enter_tag": true,
+            "exit_reason": true,
+            "no_roi": true,
+            "stoploss": true,
+            "sub_trade_ended": true,
+            "strategy_msg": true,
+            "max_open_trades": true,
+            "min_rebuy_users_notification": true,
+            "min_balance_not_reached": true,
+            "winrate": true,
+            "new_version": true,
+            "other": true
+        }
+    },
+    "discord": {
+        "enabled": false,
+        "webhook_url": "${DISCORD_WEBHOOK_URL}"
+    },
+    "webhook": {
+        "enabled": false,
+        "webhookurl": "${WEBHOOK_URL}"
+    },
+    "api_server": {
+        "enabled": true,
+        "listen_ip": "127.0.0.1",
+        "listen_port": 8080,
+        "username": "${FREQTRADE_API_USERNAME}",
+        "password": "${FREQTRADE_API_PASSWORD}",
+        "jwt_secret": "${FREQTRADE_JWT_SECRET}",
+        "whitelist_refresh_period": 60,
+        "distance_estimate_closes_invalid_trades": false,
+        "process_only_throttle_new_trades": true
+    },
+    "exchange": {
+        "name": "binance",
+        "key": "${EXCHANGE_KEY}",
+        "secret": "${EXCHANGE_SECRET}",
+        "password": "",
+        "uid": "",
+        "api_password": "",
+        "exchange_id": "binance",
+        "ccxt_config": {},
+        "ccxt_async_config": {
+            "enableRateLimit": true,
+            "rateLimit": 200
+        },
+        "markets": [
+            {
+                "spot": [
+                    "BTC/USDT",
+                    "ETH/USDT",
+                    "BNB/USDT",
+                    "SOL/USDT",
+                    "XRP/USDT",
+                    "ADA/USDT",
+                    "DOGE/USDT",
+                    "DOT/USDT",
+                    "MATIC/USDT",
+                    "LTC/USDT",
+                    "LINK/USDT",
+                    "UNI/USDT",
+                    "ATOM/USDT",
+                    "XMR/USDT",
+                    "ETC/USDT",
+                    "BCH/USDT",
+                    "FIL/USDT",
+                    "HBAR/USDT",
+                    "ALGO/USDT",
+                    "VET/USDT"
+                ]
+            }
+        ],
+        "dry_run": true,
+        "trading_mode": "futures",
+        "margin_mode": "isolated",
+        "leverage": {
+            "BTC/USDT": 5.0,
+            "ETH/USDT": 5.0,
+            "default": 5.0
+        }
+    },
+    "pairlist": {
+        "method": "VolumePairList",
+        "config": {
+            "number_assets": 20,
+            "stake_currency": "USDT",
+            "fiat_display_currency": "USD",
+            "refresh_period": 1800,
+            "sticky_period": 0,
+            "distance": "4%",
+            "number_ask_fiat": 1000,
+            "enabled": true,
+            "depth": {
+                "mode": "symmetric",
+                "target_percent_above": "2.0",
+                "target_percent_below": "-2.0",
+                "min_bid_value_multiplier": 1.5,
+                "bid_value_threshold": 0.01,
+                "ask_optimize_flexible": 0.05,
+                "ask_optimize_depth": 50
+            },
+            "top_pair_list": {
+                "number_assets": 20,
+                "sort_sorting": "quoteVolume",
+                "key": "quoteVolume"
+            },
+            "performance": {
+                "seconds": 600,
+                "remove_after": 1200,
+                "min_trades": 3
+            },
+            "shuffle_filtering": {
+                "filter_shifts": 0,
+                "shuffled_validation": false
+            },
+            "rangest": {
+                "range_max": "10%",
+                "range_min": "5%",
+                "weight_resistance": 0.0,
+                "weight_high_volume": 0.0,
+                "weight_liquidity": 0.0,
+                "weight_quote_volume": 0.0,
+                "weight_recent_sNr": 0.0,
+                "weight_age": 0.0
+            },
+            "price_filter": {
+                "min_price": 0.0001,
+                "max_price": null,
+                "max_value_pct": 0.30,
+                "enabled": true,
+                "low_price_cryptocurrency": true
+            },
+            "spread_filter": {
+                "max_spread_pct": 1.0,
+                "enabled": true
+            },
+            "volume_filter": {
+                "filter_top_volume_pct": null,
+                "filter_down_candles_5m": 10,
+                "enabled": true,
+                "lookback_days": 10
+            },
+            "age_filter": {
+                "min_days": 10,
+                "max_days": 9999,
+                "enabled": true
+            },
+            "sgd_corr_filter": {
+                "enabled": false,
+                "lookback_days": 1,
+                "remove_outliers": true,
+                "min_corr": 0.5,
+                "max_corr": 0.9,
+                "timer": 30
+            },
+            "volatility_filter": {
+                "enabled": false,
+                "lookback_days": 10,
+                "min_volatility_ratio": 0.8,
+                "max_volatility_ratio": 2.0
+            },
+            "correlation_filter": {
+                "enabled": false,
+                "lookback_days": 5,
+                "remove_outliers": false,
+                "min_corr": 0.5,
+                "max_corr": 0.9,
+                "timer": 30
+            }
+        }
+    },
+    "bot_name": "WolfStrategyV1",
+    "initial_state": "running",
+    "force_entry_enable": false,
+    "disable_dataframe_checks": false,
+    "abort_transaction_on_candle_closed": false,
+    "debuggable_handlers": false,
+    "strategy_safe_mode": false,
+    "refresh_perf_counter": 20,
+    "internals": {
+        "process_throttle_secs": 5,
+        "sec_cache_param_table_entries": 1000,
+        "OHLCV_fill_without_missing": false
+    },
+    "edge": {
+        "enabled": false,
+        "process_throttle_secs": 3600,
+        "calculate_cached_number": 9,
+        "allowed_risk": 0.01,
+        "allow_exit": false,
+        "n_close": 20,
+        "_n_irr": 20,
+        "_n_min_profit": -200,
+        "_dd_percent_weight": 0.5,
+        "_winrate_weight": 0.5,
+        "min_trade_number": null,
+        "max_trade_number_daily": null,
+        "max_trade_number_scoring": null,
+        "max_trade_duration": {
+            "min": 0,
+            "max": 9999
+        },
+        "fix_made_previous": 1.0,
+        "edge_step_scale": 0.05,
+        "candles_24h_ago_check_start": 24,
+        "candles_24h_ago_check_end": 12,
+        "past_periods_count": 26,
+        "remove_bottom_volatile_candles": false
+    },
+    "hyperopt": {
+        "position_adjustment_enable": true,
+        "max_entry_adjustment_order": 10,
+        "dca_params": {
+            "enable": true,
+            "initial_stake_amount": 100.0,
+            "py_trade_increase": 1.25,
+            "py_trade_decrease": 0.3,
+            "max_trade_number": 5,
+            "max_stake_amount": 500.0,
+            "min_trade_number": 0.3
+        }
+    },
+    "backtest": {
+        "position_adjustment_enable": true,
+        "max_entry_adjustment_order": 10,
+        "dca_params": {
+            "enable": true,
+            "initial_stake_amount": 100.0,
+            "py_trade_increase": 1.25,
+            "py_trade_decrease": 0.3,
+            "max_trade_number": 5,
+            "max_stake_amount": 500.0,
+            "min_trade_number": 0.3
+        }
+    },
+    "datadir": "user_data/data/{exchange}",
+    "user_data_dir": "user_data",
+    "export_trades": true,
+    "timerange": null,
+    "runmode": null,
+    "liquidation_buffer": "0.05",
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "unfilledtimeout": {
+        "entry": 10,
+        "exit": 30
+    },
+    "stoploss": {
+        "enabled": true,
+        "method": "absolute",
+        "shorthand": "stoploss",
+        "log": 1.0,
+        "stop": -0.5,
+        "exit": {
+            "stop": -0.05,
+            "enable": false,
+            "enable_rule": "sell_signal_stoploss",
+            "shorthand": "exit",
+            "percent": 0.5,
+            "time": 1800
+        }
+    },
+    "exit_profit_only": false,
+    "exit_profit_offset": 0.0,
+    "use_exit_signal": true,
+    "exit_signals": {
+        "enable_exit_signal": true,
+        "exit_profit_only": false,
+        "exit_profit_offset": 0.0,
+        "ignore_roi_if_entry_signal": false
+    },
+    "trend_change_buy_threshold": 1.1,
+    "trend_change_sell_threshold": 1.1,
+    "close_exit_condition": "A_trades_remaining",
+    "force_entry_use_profit_table": true,
+    "ignore_roi_if_entry_signal": false,
+    "entry_pricing": {
+        "price_last_balance": 0.0,
+        "use_order_book": true,
+        "order_book_top": 1,
+        "check_depth_of_market_on_entry": {
+            "enabled": false,
+            "bids_to_ask_delta": 1.0
+        }
+    },
+    "exit_pricing": {
+        "price_last_balance": 0.0,
+        "use_order_book": true,
+        "order_book_top": 1,
+        "check_depth_of_market_on_exit": {
+            "enabled": false,
+            "bids_to_ask_delta": 1.0
+        }
+    },
+    "custom_stake_amount": {
+        "enable": true,
+        "default_stake_amount": 100.0,
+        "stake_amount_adjustment": {
+            "enabled": true,
+            "min_stake": 30.0,
+            "max_stake": 500.0,
+            "adjust_perc": 2.0
+        }
+    },
+    "dry_run_wallet": 1000.0,
+    "available_capital": 1000.0
+}
