@@ -11,7 +11,7 @@ HYPEROPT_START?=20260101
 HYPEROPT_END?=20260131
 BACKTEST_START?=20260201
 BACKTEST_END?=20260211
-TIMEFRAME?=15m
+TIMEFRAME?=5m
 CONFIG?=/freqtrade/user_data/config.json
 STRATEGY?=WolfStrategyV1
 EPOCHS?=5000
@@ -61,9 +61,10 @@ help:
 	@echo "   Risk:        Short SL 0.8%, TP 3.0%, Taker Fee Reserve"
 	@echo ""
 	@echo "$(YELLOW)🎯 HYPEROPT & BACKTESTING:$(NC)"
-	@echo "   make hyperopt-all-docker    - Spustit hyperopt (Docker)"
-	@echo "   make backtest-docker         - Spustit backtest (Docker)"
-	@echo "   make hyperopt-show EPOCH=1   - Zobrazit výsledky epochy"
+	@echo "   make hyperopt-batch          - Sekvencni optimalizace BUY->ROI->SELL"
+	@echo "   make hyperopt-all-docker     - Hyperopt vsech spaces najednou"
+	@echo "   make backtest-docker          - Spustit backtest (Docker)"
+	@echo "   make hyperopt-show EPOCH=1    - Zobrazit výsledky epochy"
 	@echo ""
 	@echo "$(YELLOW)🐳 DOCKER OPERACE:$(NC)"
 	@echo "   make docker-pull             - Stáhnout oficiální image"
@@ -88,7 +89,8 @@ help:
 	@echo ""
 	@echo "$(CYAN)💡 PŘÍKLADY POUŽITÍ:$(NC)"
 	@echo "   make deploy TIMEFRAME=5m     - Nasadit 5m bota"
-	@echo "   make backtest-docker EPOCHS=100  - Rychlý backtest"
+	@echo "   make hyperopt-batch BUY_EPOCHS=2000  - Vic epoch pro buy"
+	@echo "   make hyperopt-batch LOSS_FN=OnlyProfitHyperOptLoss  - Jina loss"
 	@echo "   make logs-follow             - Sledovat logy v reálném čase"
 	@echo "   make docker-build-local      - Build lokálního image"
 	@echo "   make backtest USE_LOCAL_IMAGE=true  - Použít lokální image"
@@ -441,13 +443,180 @@ secrets-list:
 	@kubectl get secrets -n $(NAMESPACE) | grep wolf
 
 # ============================================================================
+# HYPEROPT BATCH - Sequential optimization pipeline
+# ============================================================================
+#
+# Optimalni poradi pro maximalizaci profitu:
+#
+#   1. BUY (vstupni podminky) - nejvetsi dopad, urcuje kvalitu signalu
+#      donchian_period, rsi_oversold, rsi_period, ema_fast, ema_slow
+#      dca_max_count, dca_base_drop, dca_multiplier, dca_cooling_candles
+#      -> 10 params, 8 optimize=True, potrebuje nejvic epoch
+#
+#   2. ROI (minimal_roi tabulka) - kdyz mame dobre vstupy, ladime exity
+#      -> freqtrade generuje ROI tabulku, male search space
+#
+#   3. SELL (exit parametry) - trailing, partial TP, short TP
+#      short_take_profit, trailing_atr_mult, breakeven_trigger, partial_profit_pct
+#      -> 4 params, stredni search space
+#
+#   Trailing space preskocen - pouzivame custom_stoploss (ATR-based),
+#   nativni trailing_stop je disabled.
+#
+#   Kazdy krok pouziva vysledky predchoziho (FreqTrade --no-color
+#   automaticky nacte posledni best z hyperopt_results).
+#
+# Pouziti:
+#   make hyperopt-batch                          # default 1000/500/500 epoch
+#   make hyperopt-batch BUY_EPOCHS=2000          # vic epoch pro buy
+#   make hyperopt-batch LOSS_FN=SharpeHyperOptLossDaily  # jina loss funkce
+#
+# ============================================================================
+
+# Epoch counts per space (buy needs most - largest search space)
+BUY_EPOCHS?=1000
+ROI_EPOCHS?=500
+SELL_EPOCHS?=500
+
+# Loss function - can be overridden per run
+# Options: OnlyProfitHyperOptLoss, SharpeHyperOptLossDaily,
+#          SortinoHyperOptLossDaily, CalmarHyperOptLoss,
+#          MaxDrawDownHyperOptLoss, ProfitDrawDownHyperOptLoss
+LOSS_FN?=SharpeHyperOptLossDaily
+
+# Min trades filter - skip results with too few trades
+MIN_TRADES?=10
+
+# Docker run template for hyperopt
+define HYPEROPT_CMD
+docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true; \
+docker run --rm -it \
+	--name $(DOCKER_CONTAINER) \
+	-v $(PWD)/user_data:/freqtrade/user_data \
+	--user $(DOCKER_USER) \
+	$(EFFECTIVE_IMAGE) \
+	hyperopt \
+	--random-state 42 \
+	--hyperopt-loss $(LOSS_FN) \
+	--strategy $(STRATEGY) \
+	--strategy-path /freqtrade/user_data/strategies \
+	--timeframe $(TIMEFRAME) \
+	-c /freqtrade/user_data/config.json \
+	--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
+	--min-trades $(MIN_TRADES) \
+	-j $(JOBS)
+endef
+
+.PHONY: hyperopt-batch hyperopt-batch-buy hyperopt-batch-roi \
+	hyperopt-batch-sell hyperopt-batch-validate
+
+hyperopt-batch: hyperopt-batch-buy hyperopt-batch-roi hyperopt-batch-sell hyperopt-batch-validate
+	@echo ""
+	@echo "$(GREEN)======================================================$(NC)"
+	@echo "$(GREEN)  HYPEROPT BATCH KOMPLETNI$(NC)"
+	@echo "$(GREEN)======================================================$(NC)"
+	@echo "$(CYAN)  1. BUY   $(BUY_EPOCHS) epoch  - vstupni podminky + DCA$(NC)"
+	@echo "$(CYAN)  2. ROI   $(ROI_EPOCHS) epoch  - minimal_roi tabulka$(NC)"
+	@echo "$(CYAN)  3. SELL  $(SELL_EPOCHS) epoch  - trailing + TP parametry$(NC)"
+	@echo "$(CYAN)  Loss fn: $(LOSS_FN)$(NC)"
+	@echo "$(GREEN)======================================================$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Dalsi kroky:$(NC)"
+	@echo "  make hyperopt-show-docker EPOCH=-1   # Nejlepsi vysledek"
+	@echo "  make backtest-docker                  # Validacni backtest"
+	@echo ""
+
+hyperopt-batch-buy:
+	@echo ""
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo "$(CYAN)  FAZE 1/3: BUY SPACE (vstupni podminky + DCA)$(NC)"
+	@echo "$(CYAN)  Epochs: $(BUY_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
+	@echo "$(CYAN)  Params: donchian_period, rsi_oversold, rsi_period,$(NC)"
+	@echo "$(CYAN)          ema_fast, ema_slow, dca_max_count,$(NC)"
+	@echo "$(CYAN)          dca_base_drop, dca_multiplier, dca_cooling$(NC)"
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo ""
+	@$(HYPEROPT_CMD) \
+		--space buy \
+		-e $(BUY_EPOCHS) || true
+	@echo ""
+	@echo "$(GREEN)  BUY SPACE hotov. Spoustim validacni backtest...$(NC)"
+	@echo ""
+	@docker run --rm \
+		-v $(PWD)/user_data:/freqtrade/user_data \
+		$(EFFECTIVE_IMAGE) \
+		backtesting \
+		--strategy $(STRATEGY) \
+		--strategy-path /freqtrade/user_data/strategies \
+		--timeframe $(TIMEFRAME) \
+		--pairs $(PAIRS) \
+		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
+		--cache none || true
+	@echo ""
+	@echo "$(GREEN)  FAZE 1/3 KOMPLETNI$(NC)"
+	@echo ""
+
+hyperopt-batch-roi:
+	@echo ""
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo "$(CYAN)  FAZE 2/3: ROI SPACE (minimal_roi tabulka)$(NC)"
+	@echo "$(CYAN)  Epochs: $(ROI_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
+	@echo "$(CYAN)  Optimalizuje casove ROI tabulku pro exit$(NC)"
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo ""
+	@$(HYPEROPT_CMD) \
+		--space roi \
+		-e $(ROI_EPOCHS) || true
+	@echo ""
+	@echo "$(GREEN)  ROI SPACE hotov.$(NC)"
+	@echo ""
+
+hyperopt-batch-sell:
+	@echo ""
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo "$(CYAN)  FAZE 3/3: SELL SPACE (exit parametry)$(NC)"
+	@echo "$(CYAN)  Epochs: $(SELL_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
+	@echo "$(CYAN)  Params: short_take_profit, trailing_atr_mult,$(NC)"
+	@echo "$(CYAN)          breakeven_trigger, partial_profit_pct$(NC)"
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo ""
+	@$(HYPEROPT_CMD) \
+		--space sell \
+		-e $(SELL_EPOCHS) || true
+	@echo ""
+	@echo "$(GREEN)  SELL SPACE hotov.$(NC)"
+	@echo ""
+
+hyperopt-batch-validate:
+	@echo ""
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo "$(CYAN)  VALIDACE: Finalní backtest s optimalizovanými params$(NC)"
+	@echo "$(CYAN)  Timerange: $(BACKTEST_START)-$(BACKTEST_END)$(NC)"
+	@echo "$(CYAN)  (Out-of-sample data - jiny obdobi nez hyperopt)$(NC)"
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo ""
+	@docker run --rm \
+		-v $(PWD)/user_data:/freqtrade/user_data \
+		$(EFFECTIVE_IMAGE) \
+		backtesting \
+		--strategy $(STRATEGY) \
+		--strategy-path /freqtrade/user_data/strategies \
+		--timeframe $(TIMEFRAME) \
+		--pairs $(PAIRS) \
+		--timerange $(BACKTEST_START)-$(BACKTEST_END) \
+		--cache none || true
+	@echo ""
+	@echo "$(GREEN)  VALIDACE KOMPLETNI$(NC)"
+	@echo ""
+
+# ============================================================================
 # WORKFLOWS
 # ============================================================================
 
 .PHONY: full-optimization quick-test
 
-full-optimization: hyperopt-all-docker
-	@echo "$(GREEN)Hyperopt dokončen. Výsledky v user_data/hyperopt_results/$(NC)"
+full-optimization: hyperopt-batch
+	@echo "$(GREEN)Full optimization pipeline dokoncen.$(NC)"
 
 quick-test: backtest-docker
 	@echo "$(GREEN)Backtest dokončen$(NC)"
