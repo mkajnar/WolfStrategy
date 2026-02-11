@@ -61,7 +61,7 @@ help:
 	@echo "   Risk:        Short SL 0.8%, TP 3.0%, Taker Fee Reserve"
 	@echo ""
 	@echo "$(YELLOW)🎯 HYPEROPT & BACKTESTING:$(NC)"
-	@echo "   make hyperopt-batch          - Sekvencni optimalizace BUY->ROI->SELL"
+	@echo "   make hyperopt-batch          - BUY+SELL combined -> ROI -> validate"
 	@echo "   make hyperopt-all-docker     - Hyperopt vsech spaces najednou"
 	@echo "   make backtest-docker          - Spustit backtest (Docker)"
 	@echo "   make hyperopt-show EPOCH=1    - Zobrazit výsledky epochy"
@@ -89,7 +89,7 @@ help:
 	@echo ""
 	@echo "$(CYAN)💡 PŘÍKLADY POUŽITÍ:$(NC)"
 	@echo "   make deploy TIMEFRAME=5m     - Nasadit 5m bota"
-	@echo "   make hyperopt-batch BUY_EPOCHS=2000  - Vic epoch pro buy"
+	@echo "   make hyperopt-batch COMBINED_EPOCHS=3000  - Vic epoch"
 	@echo "   make hyperopt-batch LOSS_FN=OnlyProfitHyperOptLoss  - Jina loss"
 	@echo "   make logs-follow             - Sledovat logy v reálném čase"
 	@echo "   make docker-build-local      - Build lokálního image"
@@ -443,37 +443,40 @@ secrets-list:
 	@kubectl get secrets -n $(NAMESPACE) | grep wolf
 
 # ============================================================================
-# HYPEROPT BATCH - Sequential optimization pipeline
+# HYPEROPT BATCH - Optimization pipeline
 # ============================================================================
 #
-# Optimalni poradi pro maximalizaci profitu:
+# v3.1 Narrowed search space (6 optimized params total):
 #
-#   1. BUY (vstupni podminky) - nejvetsi dopad, urcuje kvalitu signalu
-#      donchian_period, rsi_oversold, rsi_period, ema_fast, ema_slow
-#      dca_max_count, dca_base_drop, dca_multiplier, dca_cooling_candles
-#      -> 10 params, 8 optimize=True, potrebuje nejvic epoch
+#   BUY (3 params): donchian_period(14-30), rsi_oversold(25-45),
+#                   dca_max_count(2-6), dca_base_drop(0.01-0.04),
+#                   dca_multiplier(1.2-2.0)
+#     Fixed: rsi_period=14, atr_period=14, ema_fast=50, ema_slow=200,
+#            dca_cooling_candles=3
 #
-#   2. ROI (minimal_roi tabulka) - kdyz mame dobre vstupy, ladime exity
-#      -> freqtrade generuje ROI tabulku, male search space
+#   SELL (4 params): short_take_profit(0.015-0.05),
+#                    trailing_atr_mult(1.0-2.5),
+#                    breakeven_trigger(0.008-0.025),
+#                    partial_profit_pct(0.015-0.04)
+#     Fixed: short_max_stake=50
 #
-#   3. SELL (exit parametry) - trailing, partial TP, short TP
-#      short_take_profit, trailing_atr_mult, breakeven_trigger, partial_profit_pct
-#      -> 4 params, stredni search space
+#   Pipeline (default):
+#     1. BUY+SELL together (buy/sell are interdependent, 9 params)
+#     2. ROI separately (minimal_roi table, small search space)
+#     3. Validation backtest on out-of-sample data
 #
-#   Trailing space preskocen - pouzivame custom_stoploss (ATR-based),
-#   nativni trailing_stop je disabled.
+#   Trailing space skipped - using custom_stoploss (ATR-based),
+#   native trailing_stop is disabled.
 #
-#   Kazdy krok pouziva vysledky predchoziho (FreqTrade --no-color
-#   automaticky nacte posledni best z hyperopt_results).
-#
-# Pouziti:
-#   make hyperopt-batch                          # default 1000/500/500 epoch
-#   make hyperopt-batch BUY_EPOCHS=2000          # vic epoch pro buy
-#   make hyperopt-batch LOSS_FN=SharpeHyperOptLossDaily  # jina loss funkce
+# Usage:
+#   make hyperopt-batch                          # default 2000 + 500 epochs
+#   make hyperopt-batch COMBINED_EPOCHS=3000     # more epochs for buy+sell
+#   make hyperopt-batch LOSS_FN=OnlyProfitHyperOptLoss  # different loss fn
 #
 # ============================================================================
 
-# Epoch counts per space (buy needs most - largest search space)
+# Epoch counts (combined buy+sell needs most - 9 params)
+COMBINED_EPOCHS?=2000
 BUY_EPOCHS?=1000
 ROI_EPOCHS?=500
 SELL_EPOCHS?=500
@@ -507,17 +510,16 @@ docker run --rm -it \
 	-j $(JOBS)
 endef
 
-.PHONY: hyperopt-batch hyperopt-batch-buy hyperopt-batch-roi \
-	hyperopt-batch-sell hyperopt-batch-validate
+.PHONY: hyperopt-batch hyperopt-batch-combined hyperopt-batch-buy \
+	hyperopt-batch-roi hyperopt-batch-sell hyperopt-batch-validate
 
-hyperopt-batch: hyperopt-batch-buy hyperopt-batch-roi hyperopt-batch-sell hyperopt-batch-validate
+hyperopt-batch: hyperopt-batch-combined hyperopt-batch-roi hyperopt-batch-validate
 	@echo ""
 	@echo "$(GREEN)======================================================$(NC)"
 	@echo "$(GREEN)  HYPEROPT BATCH KOMPLETNI$(NC)"
 	@echo "$(GREEN)======================================================$(NC)"
-	@echo "$(CYAN)  1. BUY   $(BUY_EPOCHS) epoch  - vstupni podminky + DCA$(NC)"
-	@echo "$(CYAN)  2. ROI   $(ROI_EPOCHS) epoch  - minimal_roi tabulka$(NC)"
-	@echo "$(CYAN)  3. SELL  $(SELL_EPOCHS) epoch  - trailing + TP parametry$(NC)"
+	@echo "$(CYAN)  1. BUY+SELL  $(COMBINED_EPOCHS) epoch  - 9 params together$(NC)"
+	@echo "$(CYAN)  2. ROI       $(ROI_EPOCHS) epoch  - minimal_roi tabulka$(NC)"
 	@echo "$(CYAN)  Loss fn: $(LOSS_FN)$(NC)"
 	@echo "$(GREEN)======================================================$(NC)"
 	@echo ""
@@ -526,21 +528,22 @@ hyperopt-batch: hyperopt-batch-buy hyperopt-batch-roi hyperopt-batch-sell hypero
 	@echo "  make backtest-docker                  # Validacni backtest"
 	@echo ""
 
-hyperopt-batch-buy:
+hyperopt-batch-combined:
 	@echo ""
 	@echo "$(CYAN)======================================================$(NC)"
-	@echo "$(CYAN)  FAZE 1/3: BUY SPACE (vstupni podminky + DCA)$(NC)"
-	@echo "$(CYAN)  Epochs: $(BUY_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
-	@echo "$(CYAN)  Params: donchian_period, rsi_oversold, rsi_period,$(NC)"
-	@echo "$(CYAN)          ema_fast, ema_slow, dca_max_count,$(NC)"
-	@echo "$(CYAN)          dca_base_drop, dca_multiplier, dca_cooling$(NC)"
+	@echo "$(CYAN)  FAZE 1/2: BUY+SELL SPACE (entries + exits together)$(NC)"
+	@echo "$(CYAN)  Epochs: $(COMBINED_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
+	@echo "$(CYAN)  BUY:  donchian_period, rsi_oversold, dca_max_count,$(NC)"
+	@echo "$(CYAN)         dca_base_drop, dca_multiplier$(NC)"
+	@echo "$(CYAN)  SELL: short_take_profit, trailing_atr_mult,$(NC)"
+	@echo "$(CYAN)         breakeven_trigger, partial_profit_pct$(NC)"
 	@echo "$(CYAN)======================================================$(NC)"
 	@echo ""
 	@$(HYPEROPT_CMD) \
-		--space buy \
-		-e $(BUY_EPOCHS) || true
+		--space buy sell \
+		-e $(COMBINED_EPOCHS) || true
 	@echo ""
-	@echo "$(GREEN)  BUY SPACE hotov. Spoustim validacni backtest...$(NC)"
+	@echo "$(GREEN)  BUY+SELL hotov. Spoustim validacni backtest...$(NC)"
 	@echo ""
 	@docker run --rm \
 		-v $(PWD)/user_data:/freqtrade/user_data \
@@ -553,13 +556,29 @@ hyperopt-batch-buy:
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		--cache none || true
 	@echo ""
-	@echo "$(GREEN)  FAZE 1/3 KOMPLETNI$(NC)"
+	@echo "$(GREEN)  FAZE 1/2 KOMPLETNI$(NC)"
+	@echo ""
+
+hyperopt-batch-buy:
+	@echo ""
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo "$(CYAN)  BUY SPACE ONLY (vstupni podminky + DCA)$(NC)"
+	@echo "$(CYAN)  Epochs: $(BUY_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
+	@echo "$(CYAN)  Params: donchian_period, rsi_oversold, dca_max_count,$(NC)"
+	@echo "$(CYAN)          dca_base_drop, dca_multiplier$(NC)"
+	@echo "$(CYAN)======================================================$(NC)"
+	@echo ""
+	@$(HYPEROPT_CMD) \
+		--space buy \
+		-e $(BUY_EPOCHS) || true
+	@echo ""
+	@echo "$(GREEN)  BUY SPACE hotov.$(NC)"
 	@echo ""
 
 hyperopt-batch-roi:
 	@echo ""
 	@echo "$(CYAN)======================================================$(NC)"
-	@echo "$(CYAN)  FAZE 2/3: ROI SPACE (minimal_roi tabulka)$(NC)"
+	@echo "$(CYAN)  FAZE 2/2: ROI SPACE (minimal_roi tabulka)$(NC)"
 	@echo "$(CYAN)  Epochs: $(ROI_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
 	@echo "$(CYAN)  Optimalizuje casove ROI tabulku pro exit$(NC)"
 	@echo "$(CYAN)======================================================$(NC)"
@@ -574,7 +593,7 @@ hyperopt-batch-roi:
 hyperopt-batch-sell:
 	@echo ""
 	@echo "$(CYAN)======================================================$(NC)"
-	@echo "$(CYAN)  FAZE 3/3: SELL SPACE (exit parametry)$(NC)"
+	@echo "$(CYAN)  SELL SPACE ONLY (exit parametry)$(NC)"
 	@echo "$(CYAN)  Epochs: $(SELL_EPOCHS) | Loss: $(LOSS_FN)$(NC)"
 	@echo "$(CYAN)  Params: short_take_profit, trailing_atr_mult,$(NC)"
 	@echo "$(CYAN)          breakeven_trigger, partial_profit_pct$(NC)"

@@ -20,27 +20,27 @@
       "max_open_trades": 1
     },
     "buy": {
+      "donchian_period": 20,
+      "rsi_oversold": 35,
+      "rsi_period": 14,
       "atr_period": 14,
-      "long_leverage_max": 7.0,
+      "ema_fast": 50,
+      "ema_slow": 200,
+      "dca_max_count": 4,
+      "dca_base_drop": 0.02,
+      "dca_multiplier": 1.5,
+      "dca_cooling_candles": 3,
       "long_leverage_min": 2.0,
-      "dca_base_drop": 0.049,
-      "dca_cooling_candles": 2,
-      "dca_max_count": 8,
-      "dca_multiplier": 2.266,
-      "donchian_period": 18,
-      "ema_fast": 34,
-      "ema_slow": 136,
-      "rsi_oversold": 27,
-      "rsi_period": 14
+      "long_leverage_max": 7.0
     },
     "sell": {
-      "breakeven_trigger": 0.018,
-      "partial_profit_pct": 0.047,
-      "short_max_stake": 50.0,
-      "short_take_profit": 0.021,
-      "trailing_atr_mult": 2.036
+      "short_take_profit": 0.025,
+      "trailing_atr_mult": 1.5,
+      "breakeven_trigger": 0.012,
+      "partial_profit_pct": 0.025,
+      "short_max_stake": 50.0
     }
   },
   "ft_stratparam_v": 1,
-  "export_time": "2026-02-11 05:51:40.973861+00:00"
+  "export_time": "2026-02-11 12:00:00.000000+00:00"
 }

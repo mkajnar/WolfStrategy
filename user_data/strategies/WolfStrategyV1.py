@@ -73,38 +73,40 @@ class WolfStrategyV1(IStrategy):
     # ================================================================
     # HYPEROPT PARAMETERS - BUY SPACE
     # ================================================================
-    donchian_period = IntParameter(10, 50, default=20, space='buy', optimize=True)
-    rsi_oversold = IntParameter(20, 45, default=35, space='buy', optimize=True)
-    rsi_period = IntParameter(7, 21, default=14, space='buy', optimize=True)
+    # Entry signal tuning (3 params optimized)
+    donchian_period = IntParameter(14, 30, default=20, space='buy', optimize=True)
+    rsi_oversold = IntParameter(25, 45, default=35, space='buy', optimize=True)
+    rsi_period = IntParameter(10, 18, default=14, space='buy', optimize=False)
     atr_period = IntParameter(10, 20, default=14, space='buy', optimize=False)
 
-    # EMA trend filter
-    ema_fast = IntParameter(20, 100, default=50, space='buy', optimize=True)
-    ema_slow = IntParameter(100, 300, default=200, space='buy', optimize=True)
+    # EMA: fixed - these are standard values, no need to optimize
+    ema_fast = IntParameter(20, 100, default=50, space='buy', optimize=False)
+    ema_slow = IntParameter(100, 300, default=200, space='buy', optimize=False)
 
-    # DCA parameters
-    dca_max_count = IntParameter(2, 8, default=5, space='buy', optimize=True)
-    dca_base_drop = DecimalParameter(0.02, 0.06, default=0.03, space='buy', optimize=True)
-    dca_multiplier = DecimalParameter(1.1, 2.5, default=1.5, space='buy', optimize=True)
-    dca_cooling_candles = IntParameter(2, 12, default=4, space='buy', optimize=True)
+    # DCA parameters (3 params optimized)
+    dca_max_count = IntParameter(2, 6, default=4, space='buy', optimize=True)
+    dca_base_drop = DecimalParameter(0.01, 0.04, default=0.02, space='buy', optimize=True)
+    dca_multiplier = DecimalParameter(1.2, 2.0, default=1.5, space='buy', optimize=True)
+    dca_cooling_candles = IntParameter(2, 8, default=3, space='buy', optimize=False)
 
-    # Long leverage
+    # Long leverage: fixed
     long_leverage_min = DecimalParameter(2.0, 4.0, default=2.0, space='buy', optimize=False)
     long_leverage_max = DecimalParameter(5.0, 10.0, default=7.0, space='buy', optimize=False)
 
     # ================================================================
     # HYPEROPT PARAMETERS - SELL SPACE
     # ================================================================
-    short_take_profit = DecimalParameter(0.02, 0.06, default=0.03, space='sell', optimize=True)
+    # Short exit (1 param)
+    short_take_profit = DecimalParameter(0.015, 0.05, default=0.025, space='sell', optimize=True)
 
-    # Trailing stop parameters
-    trailing_atr_mult = DecimalParameter(1.0, 3.0, default=1.5, space='sell', optimize=True)
-    breakeven_trigger = DecimalParameter(0.01, 0.03, default=0.015, space='sell', optimize=True)
+    # Trailing stop parameters (2 params)
+    trailing_atr_mult = DecimalParameter(1.0, 2.5, default=1.5, space='sell', optimize=True)
+    breakeven_trigger = DecimalParameter(0.008, 0.025, default=0.012, space='sell', optimize=True)
 
-    # Partial profit taking
-    partial_profit_pct = DecimalParameter(0.02, 0.05, default=0.03, space='sell', optimize=True)
+    # Partial profit taking (1 param)
+    partial_profit_pct = DecimalParameter(0.015, 0.04, default=0.025, space='sell', optimize=True)
 
-    # Short max stake cap (USDT)
+    # Short max stake cap (USDT) - fixed
     short_max_stake = DecimalParameter(20.0, 100.0, default=50.0, space='sell', optimize=False)
 
     # ================================================================
