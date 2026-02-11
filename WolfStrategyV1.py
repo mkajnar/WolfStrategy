@@ -141,7 +141,6 @@ class WolfStrategyV1(IStrategy):
         # -- EMA Trend Filter --
         dataframe['ema_fast'] = ta.EMA(dataframe, timeperiod=self.ema_fast.value)
         dataframe['ema_slow'] = ta.EMA(dataframe, timeperiod=self.ema_slow.value)
-        dataframe['uptrend'] = dataframe['ema_fast'] > dataframe['ema_slow']
 
         # -- MACD --
         macd = ta.MACD(dataframe, fastperiod=12, slowperiod=26, signalperiod=9)
@@ -161,13 +160,6 @@ class WolfStrategyV1(IStrategy):
         dataframe['volume_sma'] = dataframe['volume'].rolling(window=20).mean()
         dataframe['volume_ratio'] = dataframe['volume'] / dataframe['volume_sma'].replace(0, np.nan)
 
-        # -- VWAP-like: cumulative (volume * close) / cumulative volume (daily reset approx) --
-        dataframe['vwap'] = (
-            (dataframe['volume'] * (dataframe['high'] + dataframe['low'] + dataframe['close']) / 3)
-            .rolling(window=20).sum() /
-            dataframe['volume'].rolling(window=20).sum().replace(0, np.nan)
-        )
-
         # -- Support detection: pivot lows (fractal-like) --
         dataframe['pivot_low'] = (
             (dataframe['low'] < dataframe['low'].shift(1)) &
@@ -175,7 +167,6 @@ class WolfStrategyV1(IStrategy):
             (dataframe['low'] < dataframe['low'].shift(-1)) &
             (dataframe['low'] < dataframe['low'].shift(-2))
         )
-        # Rolling support = lowest pivot low in last 50 bars
         dataframe['support'] = dataframe['low'].where(dataframe['pivot_low']).ffill()
         dataframe['support'] = dataframe['support'].rolling(window=50, min_periods=1).min()
 
@@ -186,49 +177,27 @@ class WolfStrategyV1(IStrategy):
             dc_range.replace(0, np.nan)
         )
 
-        # -- Price near lower Donchian (within 1.5% of lower band) --
-        dataframe['near_dc_lower'] = (
-            dataframe['close'] <= dataframe['dc_lower'] * 1.015
+        # -- Green / Red candles --
+        dataframe['green_candle'] = dataframe['close'] > dataframe['open']
+        dataframe['red_candle'] = dataframe['close'] < dataframe['open']
+
+        # -- RSI direction --
+        dataframe['rsi_rising'] = dataframe['rsi'] > dataframe['rsi'].shift(1)
+        dataframe['rsi_falling'] = dataframe['rsi'] < dataframe['rsi'].shift(1)
+
+        # -- MACD crossover --
+        dataframe['macd_cross_above'] = (
+            (dataframe['macd'] > dataframe['macd_signal']) &
+            (dataframe['macd'].shift(1) <= dataframe['macd_signal'].shift(1))
         )
-
-        # -- Bullish reversal candle patterns --
-        # Hammer: small body at top, long lower wick
-        body = abs(dataframe['close'] - dataframe['open'])
-        full_range = (dataframe['high'] - dataframe['low']).replace(0, np.nan)
-        lower_wick = np.minimum(dataframe['close'], dataframe['open']) - dataframe['low']
-
-        dataframe['hammer'] = (
-            (lower_wick > body * 2) &
-            (body / full_range < 0.35)
-        )
-
-        # Bullish engulfing: current green candle body engulfs previous red
-        dataframe['bullish_engulfing'] = (
-            (dataframe['close'] > dataframe['open']) &                      # current green
-            (dataframe['close'].shift(1) < dataframe['open'].shift(1)) &    # previous red
-            (dataframe['close'] > dataframe['open'].shift(1)) &             # current close > prev open
-            (dataframe['open'] < dataframe['close'].shift(1))               # current open < prev close
-        )
-
-        # Any bullish reversal signal
-        dataframe['bullish_reversal'] = dataframe['hammer'] | dataframe['bullish_engulfing']
-
-        # -- Bounce confirmation: close above previous low --
-        dataframe['bounce_confirmed'] = (
-            (dataframe['close'] > dataframe['low'].shift(1)) &
-            (dataframe['close'] > dataframe['open'])  # green candle
+        dataframe['macd_cross_below'] = (
+            (dataframe['macd'] < dataframe['macd_signal']) &
+            (dataframe['macd'].shift(1) >= dataframe['macd_signal'].shift(1))
         )
 
         # -- Donchian breakout down: close below previous lower --
         dataframe['dc_breakout_down'] = (
-            (dataframe['close'] < dataframe['dc_lower'].shift(1)) &
-            (dataframe['close'].shift(1) >= dataframe['dc_lower'].shift(2))
-        )
-
-        # -- Bearish momentum for Short confirmation --
-        dataframe['bear_candle'] = (
-            (dataframe['close'] < dataframe['open']) &
-            (dataframe['close'].shift(1) < dataframe['open'].shift(1))
+            dataframe['close'] < dataframe['dc_lower'].shift(1)
         )
 
         # -- Volume declining (for DCA - selling exhaustion) --
@@ -245,45 +214,89 @@ class WolfStrategyV1(IStrategy):
     # ================================================================
     # ENTRY SIGNALS
     # ================================================================
+    #
+    # Design philosophy: MULTIPLE independent entry signals, each with
+    # only 2-3 conditions. This generates thousands of trades over 13
+    # months on 15m timeframe, giving hyperopt enough data to optimize.
+    #
+    # Long signals (OR logic - any one triggers entry):
+    #   1. DC bounce: price in lower 30% of Donchian + RSI dip + green candle
+    #   2. BB bounce: price below BB lower + RSI oversold
+    #   3. RSI reversal: RSI was oversold and starts rising + green candle
+    #   4. MACD cross: MACD crosses above signal in lower DC half
+    #
+    # Short signals (OR logic):
+    #   1. DC breakdown: price breaks below DC lower
+    #   2. MACD cross down: MACD crosses below signal + price below EMA
+    #
+    # Quality is managed by DCA, trailing stop, and risk management -
+    # not by filtering entries to near-zero.
+    # ================================================================
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
 
-        # -- LONG: Donchian lower bounce + RSI oversold + trend + reversal + volume --
-        long_conditions = (
-            (dataframe['near_dc_lower']) &
+        # -- LONG 1: Donchian lower zone bounce --
+        # Price in bottom 30% of Donchian channel + RSI not overbought + green candle
+        long_dc = (
+            (dataframe['dc_position'] < 0.3) &
             (dataframe['rsi'] < self.rsi_oversold.value) &
-            (dataframe['uptrend']) &                              # EMA trend filter
-            (dataframe['bullish_reversal'] | dataframe['bounce_confirmed']) &  # reversal confirmation
-            (dataframe['volume_ratio'] > 1.2) &                  # volume spike
+            (dataframe['green_candle']) &
             (dataframe['volume'] > 0)
         )
-        dataframe.loc[long_conditions, ['enter_long', 'enter_tag']] = (1, 'long_dc_bounce')
+        dataframe.loc[long_dc, ['enter_long', 'enter_tag']] = (1, 'long_dc_bounce')
 
-        # -- LONG fallback: strong bounce without reversal candle pattern --
-        # Less strict but still requires trend + oversold + Bollinger confirmation
-        long_fallback = (
-            (dataframe['near_dc_lower']) &
-            (dataframe['rsi'] < self.rsi_oversold.value - 5) &   # deeper oversold
-            (dataframe['uptrend']) &
-            (dataframe['bb_pctb'] < 0.1) &                       # near BB lower band
-            (dataframe['bounce_confirmed']) &
+        # -- LONG 2: Bollinger Band bounce --
+        # Price touches/breaks BB lower + RSI dipping
+        long_bb = (
+            (dataframe['bb_pctb'] < 0.05) &
+            (dataframe['rsi'] < self.rsi_oversold.value + 10) &
+            (dataframe['green_candle']) &
             (dataframe['volume'] > 0) &
-            (~long_conditions)                                     # not already triggered
+            (dataframe['enter_long'] != 1)  # not already triggered
         )
-        dataframe.loc[long_fallback, ['enter_long', 'enter_tag']] = (1, 'long_bb_dc_bounce')
+        dataframe.loc[long_bb, ['enter_long', 'enter_tag']] = (1, 'long_bb_bounce')
 
-        # -- SHORT: Donchian breakout down + MACD + volume + EMA --
-        short_conditions = (
-            (dataframe['dc_breakout_down']) &
-            (dataframe['bear_candle']) &
-            (dataframe['macd_hist'] < 0) &                        # MACD histogram negative
-            (dataframe['macd_hist'] < dataframe['macd_hist'].shift(1)) &  # and falling
-            (dataframe['close'] < dataframe['ema_fast']) &        # price below EMA50
-            (dataframe['volume_ratio'] > 1.5) &                   # strong volume breakdown
-            (dataframe['rsi'] > 25) &                             # not already extremely oversold
-            (dataframe['rsi'] < 55)                                # not overbought
+        # -- LONG 3: RSI reversal from oversold --
+        # RSI was below oversold and starts rising = momentum turning
+        long_rsi = (
+            (dataframe['rsi'] < self.rsi_oversold.value + 5) &
+            (dataframe['rsi_rising']) &
+            (dataframe['rsi'].shift(1) < self.rsi_oversold.value) &
+            (dataframe['green_candle']) &
+            (dataframe['volume'] > 0) &
+            (dataframe['enter_long'] != 1)
         )
-        dataframe.loc[short_conditions, ['enter_short', 'enter_tag']] = (1, 'short_dc_breakout')
+        dataframe.loc[long_rsi, ['enter_long', 'enter_tag']] = (1, 'long_rsi_reversal')
+
+        # -- LONG 4: MACD bullish crossover in lower Donchian zone --
+        # MACD crosses above signal while price is in lower half of channel
+        long_macd = (
+            (dataframe['macd_cross_above']) &
+            (dataframe['dc_position'] < 0.5) &
+            (dataframe['volume'] > 0) &
+            (dataframe['enter_long'] != 1)
+        )
+        dataframe.loc[long_macd, ['enter_long', 'enter_tag']] = (1, 'long_macd_cross')
+
+        # -- SHORT 1: Donchian breakdown --
+        # Price breaks below DC lower channel + red candle
+        short_dc = (
+            (dataframe['dc_breakout_down']) &
+            (dataframe['red_candle']) &
+            (dataframe['volume'] > 0)
+        )
+        dataframe.loc[short_dc, ['enter_short', 'enter_tag']] = (1, 'short_dc_breakout')
+
+        # -- SHORT 2: MACD bearish crossover --
+        # MACD crosses below signal + price below EMA fast
+        short_macd = (
+            (dataframe['macd_cross_below']) &
+            (dataframe['close'] < dataframe['ema_fast']) &
+            (dataframe['red_candle']) &
+            (dataframe['volume'] > 0) &
+            (dataframe.get('enter_short', 0) != 1)
+        )
+        dataframe.loc[short_macd, ['enter_short', 'enter_tag']] = (1, 'short_macd_cross')
 
         return dataframe
 
@@ -293,17 +306,36 @@ class WolfStrategyV1(IStrategy):
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
 
-        # -- LONG EXIT: Price reaches upper Donchian or RSI overbought --
-        long_exit = (
-            (dataframe['close'] >= dataframe['dc_upper'] * 0.99) |
-            (dataframe['rsi'] > 75)
-        ) & (dataframe['volume'] > 0)
-        dataframe.loc[long_exit, ['exit_long', 'exit_tag']] = (1, 'long_dc_upper')
+        # -- LONG EXIT 1: Price in upper Donchian zone --
+        long_exit_dc = (
+            (dataframe['dc_position'] > 0.85) &
+            (dataframe['red_candle']) &
+            (dataframe['volume'] > 0)
+        )
+        dataframe.loc[long_exit_dc, ['exit_long', 'exit_tag']] = (1, 'long_dc_upper')
+
+        # -- LONG EXIT 2: RSI overbought --
+        long_exit_rsi = (
+            (dataframe['rsi'] > 70) &
+            (dataframe['rsi_falling']) &
+            (dataframe['volume'] > 0) &
+            (dataframe['exit_long'] != 1)
+        )
+        dataframe.loc[long_exit_rsi, ['exit_long', 'exit_tag']] = (1, 'long_rsi_overbought')
+
+        # -- LONG EXIT 3: MACD bearish crossover while in profit zone --
+        long_exit_macd = (
+            (dataframe['macd_cross_below']) &
+            (dataframe['dc_position'] > 0.5) &
+            (dataframe['volume'] > 0) &
+            (dataframe['exit_long'] != 1)
+        )
+        dataframe.loc[long_exit_macd, ['exit_long', 'exit_tag']] = (1, 'long_macd_exit')
 
         # -- SHORT EXIT: emergency signal if price explodes up --
         short_exit = (
             (dataframe['close'] > dataframe['dc_upper']) &
-            (dataframe['rsi'] > 70)
+            (dataframe['green_candle'])
         )
         dataframe.loc[short_exit, ['exit_short', 'exit_tag']] = (1, 'short_emergency_signal')
 
@@ -544,12 +576,10 @@ class WolfStrategyV1(IStrategy):
         **kwargs
     ) -> Optional[float]:
         """
-        Enhanced DCA for Long only:
-        1. Progressive spacing: each DCA needs bigger drop than previous
+        DCA for Long only:
+        1. Price must drop by required % from last buy (progressive spacing)
         2. Cooling period: min N candles between DCA orders
-        3. RSI oversold confirmation
-        4. Volume declining = selling exhaustion (preferred)
-        5. Max drawdown check: stop DCA if too deep
+        3. Max drawdown check: stop DCA if too deep
         """
         pair = trade.pair
 
@@ -563,18 +593,17 @@ class WolfStrategyV1(IStrategy):
         if count >= max_dca:
             return None
 
-        # Max drawdown check: stop DCA if unrealized loss > 15%
-        if current_profit < -0.15:
+        # Max drawdown check: stop DCA if unrealized loss > 20%
+        if current_profit < -0.20:
             logger.info(
-                f"[DCA_BLOCKED] {pair} - Drawdown {current_profit:.2%} > 15%, "
+                f"[DCA_BLOCKED] {pair} - Drawdown {current_profit:.2%} > 20%, "
                 f"stopping DCA"
             )
             return None
 
         # Progressive spacing: each DCA needs a bigger drop
-        # DCA1: base_drop, DCA2: base_drop * 1.5, DCA3: base_drop * 2.0, etc.
         base_drop = float(self.dca_base_drop.value)
-        progressive_factor = 1.0 + (count * 0.5)
+        progressive_factor = 1.0 + (count * 0.3)  # gentler progression
         required_drop = base_drop * progressive_factor
 
         last_price = self.last_buy_price.get(pair, None) or trade.open_rate
@@ -594,31 +623,6 @@ class WolfStrategyV1(IStrategy):
             last_dca_idx = self.last_dca_candle.get(pair, 0)
             cooling = self.dca_cooling_candles.value
             if (current_candle_idx - last_dca_idx) < cooling:
-                logger.info(
-                    f"[DCA_COOLING] {pair} #{count+1} - "
-                    f"Waiting {cooling - (current_candle_idx - last_dca_idx)} more candles"
-                )
-                return None
-
-            # RSI must be below threshold
-            rsi = last_candle.get('rsi', 50)
-            if rsi > self.rsi_oversold.value + 10:
-                logger.info(
-                    f"[DCA_SKIP] {pair} #{count+1} - RSI {rsi:.1f} too high "
-                    f"(need < {self.rsi_oversold.value + 10})"
-                )
-                return None
-
-            # Prefer volume declining (selling exhaustion)
-            vol_declining = last_candle.get('volume_declining', False)
-            near_support = current_rate <= last_candle.get('support', 0) * 1.02
-
-            # If neither volume dry-up nor near support, skip (but allow deep oversold)
-            if not vol_declining and not near_support and rsi > self.rsi_oversold.value:
-                logger.info(
-                    f"[DCA_SKIP] {pair} #{count+1} - "
-                    f"No volume dry-up, not near support, RSI not deep oversold"
-                )
                 return None
 
         except Exception:
@@ -644,8 +648,7 @@ class WolfStrategyV1(IStrategy):
         logger.info(
             f"[DCA] {pair} #{count+1}/{max_dca} - "
             f"Price: {current_rate:.2f} (last: {last_price:.2f}, "
-            f"drop: {required_drop:.1%}), "
-            f"RSI: {rsi:.1f}, Stake: {dca_stake:.2f}"
+            f"drop: {required_drop:.1%}), Stake: {dca_stake:.2f}"
         )
 
         return dca_stake

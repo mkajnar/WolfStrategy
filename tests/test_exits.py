@@ -13,38 +13,33 @@ from helpers import make_mock_trade
 class TestExitSignals:
     """Test populate_exit_trend signals."""
 
-    def test_long_exit_at_dc_upper(self, strategy, sample_dataframe):
-        """Long exit should fire when price near DC upper."""
+    def test_long_exit_signals_generated(self, strategy, sample_dataframe):
+        """Must generate some long exit signals."""
         df = strategy.populate_indicators(sample_dataframe, {'pair': 'BTC/USDT'})
         df = strategy.populate_exit_trend(df, {'pair': 'BTC/USDT'})
 
-        long_exits = df[df.get('exit_long', 0) == 1]
-        if len(long_exits) > 0:
-            # Must be near DC upper OR RSI > 75
-            for _, row in long_exits.iterrows():
-                near_upper = row['close'] >= row['dc_upper'] * 0.99
-                rsi_high = row['rsi'] > 75
-                assert near_upper or rsi_high, \
-                    "Long exit without DC upper or RSI overbought"
+        exit_count = (df.get('exit_long', 0) == 1).sum()
+        assert exit_count > 0, "No long exit signals generated"
 
-    def test_long_exit_has_tag(self, strategy, sample_dataframe):
-        """Long exit tag must be 'long_dc_upper'."""
+    def test_long_exit_has_valid_tags(self, strategy, sample_dataframe):
+        """Long exit tags must be recognized."""
         df = strategy.populate_indicators(sample_dataframe, {'pair': 'BTC/USDT'})
         df = strategy.populate_exit_trend(df, {'pair': 'BTC/USDT'})
 
-        long_exits = df[df.get('exit_long', 0) == 1]
-        if len(long_exits) > 0:
-            assert (long_exits['exit_tag'] == 'long_dc_upper').all()
+        exits = df[df.get('exit_long', 0) == 1]
+        if len(exits) > 0:
+            valid_tags = {'long_dc_upper', 'long_rsi_overbought', 'long_macd_exit'}
+            for tag in exits['exit_tag'].unique():
+                assert tag in valid_tags, f"Unknown exit tag: {tag}"
 
     def test_short_emergency_exit(self, strategy, sample_dataframe):
-        """Short emergency exit when price > DC upper + RSI > 70."""
+        """Short emergency exit when price > DC upper."""
         df = strategy.populate_indicators(sample_dataframe, {'pair': 'BTC/USDT'})
         df = strategy.populate_exit_trend(df, {'pair': 'BTC/USDT'})
 
         short_exits = df[df.get('exit_short', 0) == 1]
         if len(short_exits) > 0:
             assert (short_exits['close'] > short_exits['dc_upper']).all()
-            assert (short_exits['rsi'] > 70).all()
 
 
 class TestCustomExit:
@@ -95,7 +90,7 @@ class TestCustomExit:
     def test_long_partial_profit_only_once(self, strategy, mock_trade):
         """Partial TP should only fire once per trade."""
         pair = 'BTC/USDT'
-        strategy.partial_profit_taken[pair] = True  # already taken
+        strategy.partial_profit_taken[pair] = True
         pp = strategy.partial_profit_pct.value
 
         result = strategy.custom_exit(
