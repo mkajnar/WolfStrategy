@@ -129,27 +129,10 @@ docker-run-shell:
 # DATA STAHOVÁNÍ
 # ============================================================================
 
-.PHONY: download-data-docker download-data-docker-no1m
+.PHONY: download-data-docker
 
 download-data-docker:
-	@echo "$(YELLOW)Stahování tržních dat (včetně 1m)...$(NC)"
-	@for tf in 1m 5m 15m 1h 2h 4h 1d 1w; do \
-		echo "  Stahování $$tf..."; \
-		docker run --rm \
-			-v $(PWD)/user_data:/freqtrade/user_data \
-			--user $(DOCKER_USER) \
-			$(EFFECTIVE_IMAGE) \
-			download-data \
-			--exchange bybit \
-			--pairs $(PAIRS) \
-			--timerange $(DATA_START)-$(DATA_END) \
-			--timeframe $$tf \
-			-c /freqtrade/user_data/config.json || true; \
-	done
-	@echo "$(GREEN)Data stažena$(NC)"
-
-download-data-docker-no1m:
-	@echo "$(YELLOW)Stahování tržních dat (bez 1m)...$(NC)"
+	@echo "$(YELLOW)Stahování tržních dat (5m, 15m, 1h, 2h, 4h, 1d, 1w)...$(NC)"
 	@for tf in 5m 15m 1h 2h 4h 1d 1w; do \
 		echo "  Stahování $$tf..."; \
 		docker run --rm \
