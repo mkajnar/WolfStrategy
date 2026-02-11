@@ -1,0 +1,40 @@
+{
+  "strategy_name": "WolfStrategyV1",
+  "params": {
+    "stoploss": {
+      "stoploss": -0.99
+    },
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {
+      "atr_period": 14,
+      "long_leverage_max": 5.0,
+      "long_leverage_min": 2.0,
+      "dca_max_count": 2,
+      "dca_multiplier": 1.861,
+      "dca_price_drop": 0.024,
+      "donchian_period": 37,
+      "rsi_oversold": 34,
+      "rsi_period": 10
+    },
+    "sell": {
+      "short_stop_loss": 0.01,
+      "short_take_profit": 0.032
+    },
+    "roi": {
+      "0": 0.252,
+      "39": 0.153,
+      "136": 0.058,
+      "446": 0
+    },
+    "trailing": {
+      "trailing_stop": true,
+      "trailing_stop_positive": 0.098,
+      "trailing_stop_positive_offset": 0.105,
+      "trailing_only_offset_is_reached": true
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-02-11 01:41:58.132899+00:00"
+}

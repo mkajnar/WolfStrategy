@@ -181,7 +181,10 @@ prepare-hyperopt-config:
 hyperopt-all-docker:
 	@echo "$(YELLOW)Spouštění hyperopt (BUY, SELL, ROI, TRAILING)...$(NC)"
 	@echo "$(CYAN)Strategie: $(STRATEGY) | Epochs: $(EPOCHS) | Timeframe: $(TIMEFRAME)$(NC)"
-	@docker run --rm \
+	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
+	docker run --rm \
+		--name $(DOCKER_CONTAINER) \
+		-e PYTHONUNBUFFERED=1 \
 		-v $(PWD)/user_data:/freqtrade/user_data \
 		--user $(DOCKER_USER) \
 		$(EFFECTIVE_IMAGE) \
@@ -195,11 +198,17 @@ hyperopt-all-docker:
 		--space buy sell roi trailing \
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		-e $(EPOCHS) \
-		-j $(JOBS) || true
+		-j $(JOBS) \
+		--print-all \
+		--no-color \
+		--logfile /dev/null || true
 
 hyperopt-buy-docker:
 	@echo "$(YELLOW)Hyperopt BUY...$(NC)"
-	@docker run --rm \
+	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
+	docker run --rm \
+		--name $(DOCKER_CONTAINER) \
+		-e PYTHONUNBUFFERED=1 \
 		-v $(PWD)/user_data:/freqtrade/user_data \
 		--user $(DOCKER_USER) \
 		$(EFFECTIVE_IMAGE) \
@@ -213,11 +222,17 @@ hyperopt-buy-docker:
 		--space buy \
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		-e $(EPOCHS) \
-		-j $(JOBS)
+		-j $(JOBS) \
+		--print-all \
+		--no-color \
+		--logfile /dev/null
 
 hyperopt-sell-docker:
 	@echo "$(YELLOW)Hyperopt SELL...$(NC)"
-	@docker run --rm \
+	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
+	docker run --rm \
+		--name $(DOCKER_CONTAINER) \
+		-e PYTHONUNBUFFERED=1 \
 		-v $(PWD)/user_data:/freqtrade/user_data \
 		--user $(DOCKER_USER) \
 		$(EFFECTIVE_IMAGE) \
@@ -231,11 +246,17 @@ hyperopt-sell-docker:
 		--space sell \
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		-e $(EPOCHS) \
-		-j $(JOBS)
+		-j $(JOBS) \
+		--print-all \
+		--no-color \
+		--logfile /dev/null
 
 hyperopt-trailing-docker:
 	@echo "$(YELLOW)Hyperopt TRAILING...$(NC)"
-	@docker run --rm \
+	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
+	docker run --rm \
+		--name $(DOCKER_CONTAINER) \
+		-e PYTHONUNBUFFERED=1 \
 		-v $(PWD)/user_data:/freqtrade/user_data \
 		--user $(DOCKER_USER) \
 		$(EFFECTIVE_IMAGE) \
@@ -249,11 +270,17 @@ hyperopt-trailing-docker:
 		--space trailing \
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		-e $(EPOCHS) \
-		-j $(JOBS)
+		-j $(JOBS) \
+		--print-all \
+		--no-color \
+		--logfile /dev/null
 
 hyperopt-roi-docker:
 	@echo "$(YELLOW)Hyperopt ROI...$(NC)"
-	@docker run --rm \
+	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
+	docker run --rm \
+		--name $(DOCKER_CONTAINER) \
+		-e PYTHONUNBUFFERED=1 \
 		-v $(PWD)/user_data:/freqtrade/user_data \
 		--user $(DOCKER_USER) \
 		$(EFFECTIVE_IMAGE) \
@@ -267,11 +294,17 @@ hyperopt-roi-docker:
 		--space roi \
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		-e $(EPOCHS) \
-		-j $(JOBS)
+		-j $(JOBS) \
+		--print-all \
+		--no-color \
+		--logfile /dev/null
 
 hyperopt-quick-docker:
 	@echo "$(YELLOW)Quick hyperopt (50 epochs, buy space)...$(NC)"
-	@docker run --rm \
+	@docker rm -f $(DOCKER_CONTAINER) 2>/dev/null || true
+	docker run --rm \
+		--name $(DOCKER_CONTAINER) \
+		-e PYTHONUNBUFFERED=1 \
 		-v $(PWD)/user_data:/freqtrade/user_data \
 		--user $(DOCKER_USER) \
 		$(EFFECTIVE_IMAGE) \
@@ -285,7 +318,10 @@ hyperopt-quick-docker:
 		--space buy \
 		--timerange $(HYPEROPT_START)-$(HYPEROPT_END) \
 		-e 50 \
-		-j $(JOBS)
+		-j $(JOBS) \
+		--print-all \
+		--no-color \
+		--logfile /dev/null
 
 # ============================================================================
 # HYPEROPT VÝSLEDKY
