@@ -36,24 +36,19 @@ class WolfStrategyV1(IStrategy):
     can_short = True
     timeframe = '15m'
 
-    # -- Minimal ROI: only for Long --
+    # -- Minimal ROI: vysoké, nechceme exity příliš brzy --
     minimal_roi = {
-        "0": 0.05,       # 5% default ROI
-        "60": 0.03,      # 3% after 60 min
-        "180": 0.015,    # 1.5% after 3h
-        "720": 0.005     # 0.5% after 12h
+        "0": 0.15,       # 15% okamžitý TP
+        "120": 0.10,     # 10% po 2h
+        "480": 0.05,     # 5% po 8h
+        "1440": 0.02     # 2% po 24h
     }
 
     # -- Stoploss: effectively disabled, DCA handles drawdowns --
-    # At 2-5x leverage, -0.99 means price must drop ~50% to trigger
-    # We rely on DCA to average down and trailing stop to exit in profit
     stoploss = -0.99
 
-    # -- Trailing stop for Long --
-    trailing_stop = True
-    trailing_only_offset_is_reached = True
-    trailing_stop_positive = 0.01       # 1% trailing
-    trailing_stop_positive_offset = 0.02  # activate after 2% profit
+    # -- Trailing stop: VYPNUTO --
+    trailing_stop = False
 
     # -- Order types --
     order_types = {
